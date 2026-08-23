@@ -63,7 +63,7 @@ object ImagePicker {
             return Intent(Intent.ACTION_OPEN_DOCUMENT)
                 .setType("image/*")
                 .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
-                .addFlags(Intent.FLAG_GRANT_PERSISTABLE_READ_URI_PERMISSION)
+                .addFlags(android.content.pm.PackageManager.FLAG_GRANT_PERSISTABLE_READ_URI_PERMISSION)
         }
         // API 26-28: classic SAF content pick
         return Intent(Intent.ACTION_GET_CONTENT)
