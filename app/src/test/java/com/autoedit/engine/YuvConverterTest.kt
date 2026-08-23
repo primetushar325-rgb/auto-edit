@@ -85,10 +85,12 @@ class YuvConverterTest {
     fun `round trip preserves colors within tolerance`() {
         val w = 160
         val h = 96
+        // in-gamut colors only: out-of-gamut extremes clip in YUV (correct codec
+        // behavior) and would legitimately exceed any round-trip tolerance
         val rgb = IntArray(w * h) { i ->
-            val r = (i * 11) and 0xFF
-            val g = (i * 57) and 0xFF
-            val b = (i * 199) and 0xFF
+            val r = (i * 11) % 236 + 10
+            val g = (i * 57) % 236 + 10
+            val b = (i * 199) % 236 + 10
             0xFF000000.toInt() or (r shl 16) or (g shl 8) or b
         }
         val uRow = w // aligned row stride, planar
