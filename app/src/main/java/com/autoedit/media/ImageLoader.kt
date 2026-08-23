@@ -56,9 +56,8 @@ object ImageLoader {
     /** Duration of a video file in ms (0 on failure). */
     fun videoDurationMs(ctx: Context, uri: String): Long {
         val r = android.media.MediaMetadataRetriever()
-        var pfd: android.os.ParcelFileDescriptor? = null
         return try {
-            pfd = setupRetriever(ctx, uri, r)
+            setupRetriever(ctx, uri, r)
             val ms = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
                 ?.toLongOrNull() ?: 0L
             if (ms in 200..(60 * 60 * 1000)) ms else 0L
@@ -66,16 +65,14 @@ object ImageLoader {
             0L
         } finally {
             runCatching { r.release() }
-            runCatching { pfd?.close() }
         }
     }
 
     /** A thumbnail frame from a video at [timeMs] (for timeline/preview cards). */
     fun videoThumb(ctx: Context, uri: String, timeMs: Long, maxDim: Int = 320): Bitmap? = runCatching {
         val r = android.media.MediaMetadataRetriever()
-        var pfd: android.os.ParcelFileDescriptor? = null
         try {
-            pfd = setupRetriever(ctx, uri, r)
+            setupRetriever(ctx, uri, r)
             val frame = r.getFrameAtTime(timeMs * 1000, android.media.MediaMetadataRetriever.OPTION_CLOSEST)
                 ?: return@runCatching null
             // scale down
@@ -92,20 +89,19 @@ object ImageLoader {
             }
         } finally {
             runCatching { r.release() }
-            runCatching { pfd?.close() }
         }
     }.getOrNull()
 
-    private fun setupRetriever(ctx: Context, uriOrPath: String, r: android.media.MediaMetadataRetriever): android.os.ParcelFileDescriptor? {
-        return if (ProjectStorage.isPath(uriOrPath)) {
+    /**
+     * Point a MediaMetadataRetriever at [uriOrPath]. Uses the (Context, Uri)
+     * overload for content URIs - no manual fd handling, no fd lifetime bugs.
+     */
+    private fun setupRetriever(ctx: Context, uriOrPath: String, r: android.media.MediaMetadataRetriever) {
+        if (ProjectStorage.isPath(uriOrPath)) {
             if (!java.io.File(uriOrPath).exists()) throw Exception("File missing: $uriOrPath")
             r.setDataSource(uriOrPath)
-            null
         } else {
-            val pfd = ctx.contentResolver.openFileDescriptor(android.net.Uri.parse(uriOrPath), "r")
-                ?: throw Exception("Unable to open: $uriOrPath")
-            r.setDataSource((pfd as android.content.res.AssetFileDescriptor).fd)
-            pfd // caller keeps it open until done with the retriever
+            r.setDataSource(ctx, android.net.Uri.parse(uriOrPath))
         }
     }
 
