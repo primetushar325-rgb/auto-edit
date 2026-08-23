@@ -312,9 +312,12 @@ class MixedTimelineTest {
 
     @Test
     fun `test matrix - 720p and 1080p buffer sizes differ and are exact`() {
-        // the crash index was 1,036,800 = 1920x540 (U plane of 1080p)
-        assertEquals(1_036_800, YuvConverter.minChromaSize(1920, 1080, 1920, 1))
-        assertEquals(460_800, YuvConverter.minChromaSize(1280, 720, 1280, 1))
+        // The field device's encoder is semi-planar NV12 (rowStride=w, pixelStride=2).
+        // Its U/V plane for 1080p is exactly 1,036,799 bytes (last chroma row holds
+        // the w-1 = 1,919 bytes actually written). The requirement must equal that
+        // exactly - never one byte more (the reported "need=1036800" false alarm).
+        assertEquals(1_036_799, YuvConverter.minChromaSize(1920, 1080, 1920, 2))
+        assertEquals(460_799, YuvConverter.minChromaSize(1280, 720, 1280, 2))
         val cfg720 = ExportConfig(Quality.Q720, 30, AspectRatio.LANDSCAPE_16_9)
         val cfg1080 = ExportConfig(Quality.Q1080, 30, AspectRatio.LANDSCAPE_16_9)
         assertEquals(921_600, cfg720.widthFor() * cfg720.heightFor())

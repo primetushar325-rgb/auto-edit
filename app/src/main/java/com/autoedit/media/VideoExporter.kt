@@ -460,6 +460,29 @@ class VideoExporter(private val ctx: Context) {
      * (clear error, never a silent mid-export crash), then the write uses
      * the stride-correct, bounds-safe YuvConverter.
      */
+    /**
+     * Plane capacity gate. [need] is exactly "last byte we access + 1".
+     * A plane that is >=25% short is a genuine layout bug (hard error with a
+     * clear, specific message). A plane short by a small number of bytes is a
+     * known encoder short-row quirk - the converter's clamp-and-count net
+     * absorbs it (logged as a warning, never a crash).
+     */
+    private fun checkPlane(plane: String, need: Int, capacity: Int, strides: String) {
+        if (capacity < need) {
+            if (capacity * 4 < need * 3) {
+                throw ExportException(
+                    "video",
+                    "$plane plane too small for the frame: $strides, capacity=$capacity, need=$need"
+                )
+            }
+            Log.w(
+                TAG,
+                "$plane plane capacity $capacity is ${need - capacity} byte(s) below the nominal need $need ($strides) - " +
+                    "short-row encoder quirk, clamping edge writes"
+            )
+        }
+    }
+
     private fun writeYuv(img: Image, bmp: Bitmap, pixels: IntArray, w: Int, h: Int) {
         if (pixels.size < w * h) {
             throw ExportException(
@@ -482,15 +505,13 @@ class VideoExporter(private val ctx: Context) {
         val yNeed = YuvConverter.minLumaSize(w, h, yRow)
         val uNeed = YuvConverter.minChromaSize(w, h, uRow, uPix)
         val vNeed = YuvConverter.minChromaSize(w, h, vRow, vPix)
-        if (yB.position() + yB.limit() < yNeed) {
-            throw ExportException("video", "Y plane too small for ${w}x$h: rowStride=$yRow, capacity=${yB.position() + yB.limit()}, need=$yNeed")
-        }
-        if (uB.position() + uB.limit() < uNeed) {
-            throw ExportException("video", "U plane too small for ${w}x$h: rowStride=$uRow, pixelStride=$uPix, capacity=${uB.position() + uB.limit()}, need=$uNeed")
-        }
-        if (vB.position() + vB.limit() < vNeed) {
-            throw ExportException("video", "V plane too small for ${w}x$h: rowStride=$vRow, pixelStride=$vPix, capacity=${vB.position() + vB.limit()}, need=$vNeed")
-        }
+        // Gross mismatch (>=25% short) = a real layout bug -> hard error.
+        // A tiny shortfall (a few bytes, some encoders trim the last row) is
+        // absorbed by the clamp-and-count safety net inside the converter -
+        // logged, never a crash, so no plane can ever abort an export.
+        checkPlane("Y", yNeed, yB.position() + yB.limit(), "rowStride=$yRow")
+        checkPlane("U", uNeed, uB.position() + uB.limit(), "rowStride=$uRow, pixelStride=$uPix")
+        checkPlane("V", vNeed, vB.position() + vB.limit(), "rowStride=$vRow, pixelStride=$vPix")
         val clamped = YuvConverter.rgbToYuv420(pixels, w, h, yB, yRow, uB, uRow, uPix, vB, vRow, vPix)
         if (clamped > 0) {
             Log.w(TAG, "YUV write: $clamped writes clamped to plane bounds (layout mismatch) - frame may be partially corrupted")

@@ -59,12 +59,13 @@ object YuvConverter {
                 val vv = ((r - yv) * 0.713 + 128).toInt().coerceIn(0, 255)
                 y.put(yBase + xx, yv.toByte())
                 if (xx and 1 == 0) {
-                    val uIdx = if (uPix == 1) cy * uRow + xx / 2 else cy * uRow + xx
-                    val vIdx = if (vPix == 1) cy * vRow + xx / 2 else cy * vRow + xx
+                    // chroma column for luma column xx is xx/2; byte offset = (xx/2) * pixelStride
+                    val uIdx = cy * uRow + (xx / 2) * uPix
+                    val vIdx = cy * vRow + (xx / 2) * vPix
                     if (uIdx in 0 until uCap) u.put(uIdx, uv.toByte())
-                    else { u.put(uCap - 1, uv.toByte()); clamped++ }
+                    else { if (uCap > 0) u.put(uCap - 1, uv.toByte()); clamped++ }
                     if (vIdx in 0 until vCap) v.put(vIdx, vv.toByte())
-                    else { v.put(vCap - 1, vv.toByte()); clamped++ }
+                    else { if (vCap > 0) v.put(vCap - 1, vv.toByte()); clamped++ }
                 }
             }
         }
@@ -98,11 +99,14 @@ object YuvConverter {
             val yBase = yy * yRow
             for (xx in 0 until w) {
                 val yv = (y.get(yBase + xx).toInt()) and 0xFF
-                // 4:2:0 - every pixel takes the chroma sample of its 2x2 block
-                val uIdx = if (uPix == 1) cy * uRow + xx / 2 else cy * uRow + xx
-                val vIdx = if (vPix == 1) cy * vRow + xx / 2 else cy * vRow + xx
-                val uVal = (if (uIdx in 0 until uCap) u.get(uIdx).toInt() else { u.get(uCap - 1).toInt(); clamped++ }) and 0xFF
-                val vVal = (if (vIdx in 0 until vCap) v.get(vIdx).toInt() else { v.get(vCap - 1).toInt(); clamped++ }) and 0xFF
+                // 4:2:0 - every pixel takes the chroma sample of its 2x2 block:
+                // column xx/2, byte offset (xx/2) * pixelStride. (Using raw xx for
+                // semi-planar would address one byte past the last valid byte of the
+                // short last row - the "1036799 vs 1036800" off-by-one.)
+                val uIdx = cy * uRow + (xx / 2) * uPix
+                val vIdx = cy * vRow + (xx / 2) * vPix
+                val uVal = (if (uIdx in 0 until uCap) u.get(uIdx).toInt() else { if (uCap > 0) u.get(uCap - 1).toInt() else 128; clamped++ }) and 0xFF
+                val vVal = (if (vIdx in 0 until vCap) v.get(vIdx).toInt() else { if (vCap > 0) v.get(vCap - 1).toInt() else 128; clamped++ }) and 0xFF
                 val r = (yv + 1.402 * (vVal - 128)).toInt().coerceIn(0, 255)
                 val g = (yv - 0.344 * (uVal - 128) - 0.714 * (vVal - 128)).toInt().coerceIn(0, 255)
                 val b = (yv + 1.772 * (uVal - 128)).toInt().coerceIn(0, 255)
@@ -118,11 +122,22 @@ object YuvConverter {
     /** Minimum byte count a plane of these strides must hold (luma). */
     fun minLumaSize(w: Int, h: Int, rowStride: Int): Int = (h - 1) * rowStride + w
 
-    /** Minimum byte count a chroma plane of these strides must hold
-     *  (h/2 stride-aligned rows - what encoders actually allocate). */
+    /** Minimum byte count a chroma plane of these strides must hold.
+     *
+     *  This is EXACTLY "last byte we access + 1" - the true requirement.
+     *  NOTE the off-by-one nuance that caused field reports:
+     *  for 1920x1080 semi-planar (rowStride=1920, pixelStride=2) the last
+     *  accessed chroma byte is at index (540-1)*1920 + (1920-2) = 1,036,798,
+     *  so the required capacity is 1,036,799 - NOT (h/2)*rowStride = 1,036,800.
+     *  Real encoders in fact allocate the last chroma row one byte short
+     *  (capacity exactly 1,036,799), which is why using (h/2)*rowStride as
+     *  the validation threshold made a perfectly good plane "fail".
+     *  Any residual short-row quirk beyond the last accessed byte is
+     *  absorbed by the clamp-and-count safety net in the conversion loops. */
     fun minChromaSize(w: Int, h: Int, rowStride: Int, pixelStride: Int): Int {
         val chromaH = h / 2
         if (chromaH == 0) return 0
-        return chromaH * rowStride
+        return if (pixelStride == 1) (chromaH - 1) * rowStride + w / 2
+        else (chromaH - 1) * rowStride + w - 1
     }
 }
