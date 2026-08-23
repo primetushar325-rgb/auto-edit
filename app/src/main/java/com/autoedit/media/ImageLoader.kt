@@ -104,7 +104,7 @@ object ImageLoader {
         } else {
             val pfd = ctx.contentResolver.openFileDescriptor(android.net.Uri.parse(uriOrPath), "r")
                 ?: throw Exception("Unable to open: $uriOrPath")
-            r.setDataSource(pfd as android.content.res.AssetFileDescriptor)
+            r.setDataSource((pfd as android.content.res.AssetFileDescriptor).fd)
             pfd // caller keeps it open until done with the retriever
         }
     }
