@@ -14,6 +14,7 @@ import com.autoedit.engine.Adjustments
 import com.autoedit.engine.AspectRatio
 import com.autoedit.engine.AudioConfig
 import com.autoedit.engine.ClipRef
+import com.autoedit.engine.ClipType
 import com.autoedit.engine.FormulaCatalog
 import com.autoedit.engine.MotionPlanner
 import com.autoedit.engine.ProjectModel
@@ -48,7 +49,10 @@ class AppViewModel(app: Application) : ViewModel() {
     data class ClipInfo(
         val index: Int,
         val uri: String,
+        val isVideo: Boolean,
         val motionLabel: String,
+        val junctionLabel: String?,
+        val zoomLabel: String?,
         val transitionBefore: Boolean
     )
 
@@ -81,6 +85,9 @@ class AppViewModel(app: Application) : ViewModel() {
         val showExport: Boolean = false,
         val showClipMenu: Int? = null,
         val showRename: Boolean = false,
+        val showZoomEditor: Int? = null,
+        val showJunction: Int? = null,
+        val pendingVideo: Pair<String, Double>? = null,
         val exporting: Boolean = false,
         val exportProgress: Float = 0f,
         val exportStage: String = "",
@@ -116,7 +123,7 @@ class AppViewModel(app: Application) : ViewModel() {
             name = "Project $n",
             createdAt = System.currentTimeMillis(),
             updatedAt = System.currentTimeMillis(),
-            formulaId = FormulaCatalog.F01.id,
+            formulaId = null,
             motionSeed = (System.nanoTime() and 0x7FFFFFFFFFFFFFFFL)
         )
         repo.save(p)
@@ -132,13 +139,11 @@ class AppViewModel(app: Application) : ViewModel() {
             createdAt = System.currentTimeMillis(),
             updatedAt = System.currentTimeMillis(),
             formulaId = f.id,
-            motionSeed = (System.nanoTime() and 0x7FFFFFFFFFFFFFFFL),
-            clipDurationSec = f.clipDurationSec,
-            transition = f.transition,
-            transitionDurationSec = f.transitionDurationSec
+            motionSeed = (System.nanoTime() and 0x7FFFFFFFFFFFFFFFL)
         )
         repo.save(p)
         openProject(p.id)
+        toast("${f.name} ${f.tagline} ready - tap APPLY FORMULA when images are added")
     }
 
     fun openProject(id: String) {
@@ -177,11 +182,23 @@ class AppViewModel(app: Application) : ViewModel() {
             it.copy(
                 projectName = p.name,
                 clipInfos = p.clips.mapIndexed { i, c ->
+                    val zoomLabel = if (c.hasZoomOverride()) {
+                        "%.0f\u2192%.0f%%".format(c.startZoom?.times(100f) ?: 100f, c.endZoom?.times(100f) ?: 92f)
+                    } else null
                     ClipInfo(
                         index = i,
                         uri = c.uri,
-                        motionLabel = c.motion?.type?.short() ?: "—",
-                        transitionBefore = i > 0 && p.transition != TransitionType.NONE
+                        isVideo = c.type == ClipType.VIDEO,
+                        motionLabel = when {
+                            zoomLabel != null -> "Z $zoomLabel"
+                            c.motion != null -> c.motion.type.short()
+                            else -> "—"
+                        },
+                        junctionLabel = p.junctionTransitions[i]?.let { t ->
+                            if (t == p.transition) null else t.label()
+                        },
+                        zoomLabel = zoomLabel,
+                        transitionBefore = i > 0 && (p.junctionTransitions[i] ?: p.transition) != TransitionType.NONE
                     )
                 },
                 clipCount = p.clips.size,
@@ -214,8 +231,6 @@ class AppViewModel(app: Application) : ViewModel() {
 
     fun addImages(uris: List<Uri>) {
         val p = current() ?: return
-        val f = FormulaCatalog.byId(p.formulaId) ?: FormulaCatalog.F01
-        val planner = MotionPlanner()
         val newClips = p.clips.toMutableList()
         val addedUris = mutableListOf<String>()
         var added = 0
@@ -228,9 +243,9 @@ class AppViewModel(app: Application) : ViewModel() {
                 skipped++
                 continue
             }
-            val i = newClips.size
-            val motion = planner.plan(1, f, p.motionSeed * 31L + i * 1_000_003L)[0]
-            newClips += ClipRef(uri = s, motion = motion)
+            // Newly added clips are STATIC by default - no auto formula/motion.
+            // Motion is applied only when the user taps "Apply Formula" or sets zoom.
+            newClips += ClipRef(uri = s, type = ClipType.IMAGE, motion = null)
             addedUris += s
             added++
         }
@@ -243,10 +258,12 @@ class AppViewModel(app: Application) : ViewModel() {
             return
         }
         mutate { pr -> pr.copy(clips = newClips) }
-        val total = p.totalDuration() + added * f.clipDurationSec
+        val total = (p.clips.size + added) * p.imageClipDuration()
         val totalStr = fmtTime(total)
-        toast(if (added >= 100) "$added images imported • Total duration: $totalStr"
-              else "+$added image${if (added > 1) "s" else ""} added ($totalStr total)")
+        toast(
+            if (added >= 100) "$added images imported • Total duration: $totalStr"
+            else "+$added image${if (added > 1) "s" else ""} added ($totalStr total) — apply a Formula or set zoom"
+        )
         // Background validation: corrupted/unsupported images must never crash
         // the import - report them with a friendly message instead.
         mainScope.launch {
@@ -259,7 +276,13 @@ class AppViewModel(app: Application) : ViewModel() {
 
     fun removeClip(i: Int) {
         _ui.update { it.copy(showClipMenu = null) }
-        mutate { pr -> pr.copy(clips = pr.clips.filterIndexed { idx, _ -> idx != i }) }
+        mutate { pr ->
+            val clips = pr.clips.filterIndexed { idx, _ -> idx != i }
+            val junctions = pr.junctionTransitions
+                .filterKeys { it > i }
+                .mapKeys { it.key - 1 }
+            pr.copy(clips = clips, junctionTransitions = junctions)
+        }
     }
 
     fun moveClip(i: Int, delta: Int) {
@@ -315,6 +338,90 @@ class AppViewModel(app: Application) : ViewModel() {
             )
         }
         toast("New motion sequence generated")
+    }
+
+    // -------------------------------------------------- per-clip zoom override
+
+    fun setClipZoom(index: Int, startZoom: Float, endZoom: Float, applyToAll: Boolean) {
+        val s = startZoom.coerceIn(0.5f, 1.5f)
+        val e = endZoom.coerceIn(0.5f, 1.5f)
+        _ui.update { it.copy(showZoomEditor = null) }
+        mutate { pr ->
+            val clips = pr.clips.mapIndexed { i, c ->
+                if (i == index || applyToAll) c.copy(startZoom = s, endZoom = e) else c
+            }
+            pr.copy(clips = clips)
+        }
+        toast(if (applyToAll) "Zoom ${"%.0f".format(s * 100)}% ${"\u2192"} ${"%.0f".format(e * 100)}% applied to ALL clips"
+              else "Zoom set for image ${index + 1}")
+    }
+
+    fun clearClipZoom(index: Int) {
+        _ui.update { it.copy(showZoomEditor = null) }
+        mutate { pr ->
+            pr.copy(clips = pr.clips.mapIndexed { i, c ->
+                if (i == index) c.copy(startZoom = null, endZoom = null) else c
+            })
+        }
+        toast("Custom zoom cleared - back to formula")
+    }
+
+    // -------------------------------------------------- junction transitions
+
+    fun setJunctionTransition(junction: Int, t: TransitionType?) {
+        _ui.update { it.copy(showJunction = null) }
+        mutate { pr ->
+            val j = pr.junctionTransitions.toMutableMap()
+            if (t == null) j.remove(junction) else j[junction] = t
+            pr.copy(junctionTransitions = j)
+        }
+        toast(if (t == null) "Junction back to project default"
+              else "Junction: ${t.label()}")
+    }
+
+    // -------------------------------------------------- video clips
+
+    fun openVideoPicker(uri: Uri) {
+        mainScope.launch {
+            toast("Reading video…")
+            val s = uri.toString()
+            val durMs = withContext(Dispatchers.IO) {
+                com.autoedit.media.ImageLoader.videoDurationMs(app, s)
+            }
+            if (durMs <= 200) {
+                toast("Unable to read this video file")
+                return@launch
+            }
+            _ui.update { it.copy(pendingVideo = s to (durMs / 1000.0)) }
+        }
+    }
+
+    fun confirmAddVideo(inMs: Long, outMs: Long, insertAt: Int) {
+        val pend = _ui.value.pendingVideo ?: return
+        val (s, durSec) = pend
+        if (outMs <= inMs + 200) {
+            toast("Video segment is too short")
+            return
+        }
+        val inC = inMs.coerceIn(0L, (durSec * 1000).toLong() - 200)
+        val outC = outMs.coerceIn(inC + 200, (durSec * 1000).toLong())
+        _ui.update { it.copy(pendingVideo = null) }
+        mutate { pr ->
+            val clips = pr.clips.toMutableList()
+            val at = insertAt.coerceIn(0, clips.size)
+            clips.add(at, ClipRef(uri = s, type = ClipType.VIDEO, videoInMs = inC, videoOutMs = outC))
+            // junctions at/after the insertion shift by one
+            val junctions = pr.junctionTransitions.mapKeys {
+                if (it.key >= at) it.key + 1 else it.key
+            }
+            pr.copy(clips = clips, junctionTransitions = junctions)
+        }
+        val seg = (outC - inC) / 1000.0
+        toast("Video added (${fmtTime(seg)} segment)")
+    }
+
+    fun cancelVideo() {
+        _ui.update { it.copy(pendingVideo = null) }
     }
 
     fun setTransition(t: TransitionType) {
@@ -442,17 +549,26 @@ class AppViewModel(app: Application) : ViewModel() {
             val out = HashMap<Int, ImageBitmap>()
             for (i in indices) {
                 val clip = p.clips.getOrNull(i) ?: continue
-                val bmp = ImageLoader.decodeScaled(app, clip.uri, 1280) ?: continue
-                out[i] = bmp.asImageBitmap()
+                val bmp = if (clip.type == ClipType.VIDEO) {
+                    val mid = clip.videoInMs + (clip.videoOutMs - clip.videoInMs) / 2
+                    ImageLoader.videoThumb(app, clip.uri, mid, maxDim = 1280)
+                } else {
+                    ImageLoader.decodeScaled(app, clip.uri, 1280)
+                }
+                if (bmp != null) out[i] = bmp.asImageBitmap()
             }
             out
         }
     }
 
-    suspend fun loadThumb(uri: String): ImageBitmap? = withContext(Dispatchers.IO) {
+    suspend fun loadThumb(uri: String, isVideo: Boolean = false): ImageBitmap? = withContext(Dispatchers.IO) {
         val cached = synchronized(thumbLru) { thumbLru[uri] }
         if (cached != null) return@withContext cached
-        val bmp: Bitmap = ImageLoader.decodeScaled(app, uri, 256) ?: return@withContext null
+        val bmp: Bitmap = if (isVideo) {
+            ImageLoader.videoThumb(app, uri, 500, maxDim = 256) ?: return@withContext null
+        } else {
+            ImageLoader.decodeScaled(app, uri, 256) ?: return@withContext null
+        }
         val ib = bmp.asImageBitmap()
         synchronized(thumbLru) {
             thumbLru.remove(uri)
@@ -519,13 +635,13 @@ class AppViewModel(app: Application) : ViewModel() {
             result.onSuccess {
                 toast("Video saved to Movies/Auto Edit")
             }.onFailure { e ->
-                toast(
-                    if (e is VideoExporter.ExportCancelled) "Export cancelled"
-                    else if (e.message == "Not enough storage or could not create the video file." ||
-                        e.message == "Not enough storage to export this video."
-                    ) "Not enough storage to export this video."
-                    else "Export failed. Please try again."
-                )
+                val msg = when {
+                    e is VideoExporter.ExportCancelled -> "Export cancelled"
+                    e.message != null && e.message!!.contains("storage", ignoreCase = true) ->
+                        "Not enough storage to export this video."
+                    else -> (e.message ?: "Export failed. Please try again.").take(300)
+                }
+                toast(msg)
             }
         }
     }
@@ -549,14 +665,20 @@ class AppViewModel(app: Application) : ViewModel() {
                  showAdjust: Boolean = _ui.value.showAdjust,
                  showExport: Boolean = _ui.value.showExport,
                  showClipMenu: Int? = _ui.value.showClipMenu,
-                 showRename: Boolean = _ui.value.showRename) {
+                 showRename: Boolean = _ui.value.showRename,
+                 showZoomEditor: Int? = _ui.value.showZoomEditor,
+                 showJunction: Int? = _ui.value.showJunction,
+                 pendingVideo: Pair<String, Double>? = _ui.value.pendingVideo) {
         _ui.update {
             it.copy(
                 showFormula = showFormula,
                 showAdjust = showAdjust,
                 showExport = showExport,
                 showClipMenu = showClipMenu,
-                showRename = showRename
+                showRename = showRename,
+                showZoomEditor = showZoomEditor,
+                showJunction = showJunction,
+                pendingVideo = pendingVideo
             )
         }
     }

@@ -17,8 +17,8 @@ class ProjectJsonTest {
         clips = listOf(
             ClipRef("content://media/1"),
             ClipRef(
-                "content://media/2",
-                ClipMotion(MotionType.ZOOM_IN, Keyframe(1.0f, 0f, 0f), Keyframe(1.08f, 0.01f, 0f))
+                uri = "content://media/2",
+                motion = ClipMotion(MotionType.ZOOM_IN, Keyframe(1.0f, 0f, 0f), Keyframe(1.08f, 0.01f, 0f))
             )
         ),
         formulaId = "F01",
@@ -88,6 +88,35 @@ class ProjectJsonTest {
         } catch (e: IllegalArgumentException) {
             // expected
         }
+    }
+
+    @Test
+    fun `round trip keeps video clips zoom overrides and junctions`() {
+        val p = ProjectModel(
+            id = "mix",
+            name = "mix",
+            createdAt = 1L,
+            updatedAt = 2L,
+            clips = listOf(
+                ClipRef(uri = "img1"),
+                ClipRef(uri = "vid1", type = ClipType.VIDEO, videoInMs = 1500L, videoOutMs = 6500L),
+                ClipRef(uri = "img2", startZoom = 1f, endZoom = 0.85f)
+            ),
+            junctionTransitions = mapOf(1 to TransitionType.FLASH, 2 to TransitionType.SLIDE_LEFT)
+        )
+        val d = ProjectJson.decode(ProjectJson.encode(p))
+        assertEquals(3, d.clips.size)
+        assertEquals(ClipType.VIDEO, d.clips[1].type)
+        assertEquals(1500L, d.clips[1].videoInMs)
+        assertEquals(6500L, d.clips[1].videoOutMs)
+        assertNull(d.clips[0].startZoom)
+        assertNull(d.clips[0].endZoom)
+        assertEquals(1f, d.clips[2].startZoom!!, 1e-6f)
+        assertEquals(0.85f, d.clips[2].endZoom!!, 1e-6f)
+        assertEquals(TransitionType.FLASH, d.junctionTransitions[1])
+        assertEquals(TransitionType.SLIDE_LEFT, d.junctionTransitions[2])
+        // duration math follows the stored video trim
+        assertEquals(3.0 + 5.0 + 3.0, d.totalDuration(), 1e-9)
     }
 
     @Test

@@ -16,7 +16,8 @@ data class Keyframe(
 }
 
 enum class MotionType {
-    ZOOM_IN, ZOOM_OUT, PAN_LEFT, PAN_RIGHT, PAN_UP, PAN_DOWN, ZOOM_PAN, KEN_BURNS;
+    ZOOM_IN, ZOOM_OUT, PAN_LEFT, PAN_RIGHT, PAN_UP, PAN_DOWN, ZOOM_PAN, KEN_BURNS,
+    PUNCH_ZOOM, RAMP_ZOOM, SHAKE, WHIP_PAN;
 
     fun label(): String = when (this) {
         ZOOM_IN -> "Zoom In"
@@ -27,6 +28,10 @@ enum class MotionType {
         PAN_DOWN -> "Pan Down"
         ZOOM_PAN -> "Zoom + Pan"
         KEN_BURNS -> "Ken Burns"
+        PUNCH_ZOOM -> "Beat Punch"
+        RAMP_ZOOM -> "Speed Ramp"
+        SHAKE -> "On-Beat Shake"
+        WHIP_PAN -> "Whip Pan"
     }
 
     fun short(): String = when (this) {
@@ -38,6 +43,10 @@ enum class MotionType {
         PAN_DOWN -> "PD"
         ZOOM_PAN -> "ZP"
         KEN_BURNS -> "KB"
+        PUNCH_ZOOM -> "BP"
+        RAMP_ZOOM -> "SR"
+        SHAKE -> "SH"
+        WHIP_PAN -> "WP"
     }
 }
 
@@ -172,10 +181,60 @@ data class ExportConfig(
     }
 }
 
+enum class ClipType { IMAGE, VIDEO }
+
+/**
+ * One timeline clip: an image or a trimmed video segment.
+ *
+ * Zoom override ([startZoom]/[endZoom], scale factors where 1.0 = 100%)
+ * sits ON TOP of the formula-assigned motion: it replaces the scale
+ * keyframes while keeping the formula's pan. Newly added clips have
+ * motion = null (static) until the user applies a formula or sets zoom.
+ */
 data class ClipRef(
     val uri: String,
-    val motion: ClipMotion? = null
-)
+    val type: ClipType = ClipType.IMAGE,
+    val motion: ClipMotion? = null,
+    /** Video trim start (ms) - only for VIDEO clips. */
+    val videoInMs: Long = 0L,
+    /** Video trim end (ms) - only for VIDEO clips. */
+    val videoOutMs: Long = 0L,
+    /** Per-clip start zoom override (1.0 = 100%), null = follow formula. */
+    val startZoom: Float? = null,
+    /** Per-clip end zoom override (0.92 = 92%), null = follow formula. */
+    val endZoom: Float? = null
+) {
+    /** Default manual end-zoom: 100% -> 92% push. */
+    companion object {
+        const val DEFAULT_END_ZOOM = 0.92f
+    }
+
+    /**
+     * Effective motion: formula motion + per-clip zoom override applied on top.
+     * With no formula motion but a zoom override, a plain zoom motion is created.
+     */
+    fun resolvedMotion(): ClipMotion? {
+        val base = motion
+        val hasZoom = startZoom != null || endZoom != null
+        if (base == null) {
+            return if (hasZoom) {
+                val s = (startZoom ?: 1f).coerceIn(0.5f, 1.5f)
+                val e = (endZoom ?: DEFAULT_END_ZOOM).coerceIn(0.5f, 1.5f)
+                ClipMotion(
+                    if (e >= s) MotionType.ZOOM_IN else MotionType.ZOOM_OUT,
+                    Keyframe(s), Keyframe(e)
+                )
+            } else null
+        }
+        if (!hasZoom) return base
+        return base.copy(
+            start = base.start.copy(scale = (startZoom ?: base.start.scale).coerceIn(0.5f, 1.5f)),
+            end = base.end.copy(scale = (endZoom ?: base.end.scale).coerceIn(0.5f, 1.5f))
+        )
+    }
+
+    fun hasZoomOverride(): Boolean = startZoom != null || endZoom != null
+}
 
 data class ProjectModel(
     val id: String,
@@ -194,21 +253,46 @@ data class ProjectModel(
     val duckMusic: Boolean = true,
     val fitToVoice: Boolean = false,
     val adjustments: Adjustments = Adjustments(),
-    val export: ExportConfig = ExportConfig()
-) {
+    val export: ExportConfig = ExportConfig(),
     /**
-     * Clip duration actually used for preview/export.
-     * Default mode: fixed [clipDurationSec] (3 seconds).
-     * Fit-to-voice mode: voice duration / number of images.
+     * Per-junction transition overrides (CapCut-style).
+     * Key = index of the clip that STARTS the junction (1..n-1).
+     * Unlisted junctions use the project-wide [transition].
      */
-    fun effectiveClipDuration(): Double {
+    val junctionTransitions: Map<Int, TransitionType> = emptyMap()
+) {
+    /** Duration of one image clip for this project (fit-to-voice aware). */
+    fun imageClipDuration(): Double {
         if (fitToVoice) {
             val v = voice?.durationSec ?: return clipDurationSec
-            val n = clips.size.coerceAtLeast(1)
-            return v / n
+            val videoLen = clips
+                .filter { it.type == ClipType.VIDEO }
+                .sumOf { ((it.videoOutMs - it.videoInMs) / 1000.0).coerceAtLeast(0.0) }
+            val images = clips.count { it.type == ClipType.IMAGE }.coerceAtLeast(1)
+            return ((v - videoLen) / images).coerceAtLeast(0.2)
         }
         return clipDurationSec
     }
 
-    fun totalDuration(): Double = clips.size * effectiveClipDuration()
+    /** Duration of clip at [i] (images use the project duration, videos their trim length). */
+    fun clipDurationAt(i: Int): Double {
+        val c = clips.getOrNull(i) ?: return 0.0
+        return if (c.type == ClipType.VIDEO) {
+            ((c.videoOutMs - c.videoInMs) / 1000.0).coerceAtLeast(0.2)
+        } else {
+            imageClipDuration()
+        }
+    }
+
+    /** Exact list of per-clip durations, used by the timeline math. */
+    fun clipDurations(): List<Double> = List(clips.size) { i -> clipDurationAt(i) }
+
+    fun totalDuration(): Double = clipDurations().sumOf { it.coerceAtLeast(0.0) }
+
+    /** Transition used at the junction that starts clip [i] (or null for the first clip). */
+    fun junctionTransition(i: Int): TransitionType? =
+        if (i <= 0) null else junctionTransitions[i] ?: transition
+
+    /** Back-compat alias. */
+    fun effectiveClipDuration(): Double = imageClipDuration()
 }

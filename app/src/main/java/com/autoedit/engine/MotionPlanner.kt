@@ -20,7 +20,7 @@ class MotionPlanner {
         var lastLast: MotionType? = null
         for (i in 0 until clipCount) {
             val type = pick(pool, formula.motionMode, last, lastLast, rng)
-            out += makeMotion(type, formula, rng)
+            out += makeMotion(type, formula, rng, i)
             lastLast = last
             last = type
         }
@@ -36,11 +36,16 @@ class MotionPlanner {
     ): MotionType {
         if (mode == MotionMode.FIXED || pool.size == 1) return pool[0]
         val fresh = pool.filter { it != last && it != lastLast }
-        val candidates = if (fresh.isNotEmpty()) fresh else pool
+        val candidates = when {
+            fresh.isNotEmpty() -> fresh
+            // even with a tiny pool, never repeat the immediate previous motion
+            pool.size > 1 -> pool.filter { it != last }
+            else -> pool
+        }
         return candidates[rng.nextInt(candidates.size)]
     }
 
-    private fun makeMotion(type: MotionType, f: Formula, rng: Random): ClipMotion {
+    private fun makeMotion(type: MotionType, f: Formula, rng: Random, index: Int): ClipMotion {
         val zoom = f.zoomMin + (f.zoomMax - f.zoomMin) * rng.nextFloat()
         val pan = f.panMax * (0.6f + 0.4f * rng.nextFloat())
         val smallZoom = zoom * 0.4f
@@ -98,6 +103,31 @@ class MotionPlanner {
                     Keyframe(1f, 0f, pan * 0.5f),
                     Keyframe(1f + zoom * 0.75f, 0f, -pan * 0.5f)
                 )
+
+            // --------------------------------------------------- trend shapes
+            MotionType.PUNCH_ZOOM ->
+                // starts zoomed in, snaps back to 100% (beat punch)
+                ClipMotion(type, Keyframe(1f + zoom, 0f, 0f), Keyframe(1f, 0f, 0f))
+
+            MotionType.RAMP_ZOOM ->
+                // accelerating push into 115-125%
+                ClipMotion(type, Keyframe(1f, 0f, 0f), Keyframe(1f + zoom, 0f, 0f))
+
+            MotionType.SHAKE -> {
+                // alternating directional jolt, settles to center
+                val dir = if (index % 2 == 0) 1f else -1f
+                ClipMotion(type, Keyframe(1f, dir * pan * 1.6f, 0f), Keyframe(1f, 0f, 0f))
+            }
+
+            MotionType.WHIP_PAN -> {
+                // fast whip swing landing in the center
+                val dir = if (index % 2 == 0) 1f else -1f
+                ClipMotion(
+                    type,
+                    Keyframe(1f + zoom * 0.3f, dir * pan * 1.8f, 0f),
+                    Keyframe(1f + zoom * 0.3f, 0f, 0f)
+                )
+            }
         }
     }
 }

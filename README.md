@@ -43,6 +43,11 @@ Built-in formulas (easy to extend — one data object each):
 ## Features
 
 - **Multi-image import** via the Android system Photo Picker (API 33+, max clamped to the device limit) with a Storage-Access-Fallback for API 26-32 (persistent URI grants), reorder, delete, re-add — zero permissions
+- **No auto-formula**: imported clips start STATIC; motion is applied only when you tap Apply Formula or set custom zoom
+- **Per-clip custom zoom**: start 100% -> end 92% push by default (user-editable 80-130%), with an "Apply to all clips" toggle
+- **Mixed image + video timelines**: insert a trimmed video segment (trim in/out) at any position; export renders real video frames
+- **Per-junction transitions (CapCut-style)**: tap the marker on any clip gap to set that junction's transition independently (cut, dissolve, slide, zoom-blur, glitch flash, whip-pan...)
+- **2026 Viral Trending Effects** (separate tab): beat punch, glitch flash cuts, speed-ramp zoom, on-beat shake, whip-pan — one-tap apply on the same engine
 - **Timeline** with thumbnails, image numbers, motion indicators, transition markers
 - **Preview player** with play / pause / restart / fullscreen — mirrors the export exactly
 - **10 transitions**: None, Fade, Cross Dissolve, Slide L/R/U/D, Zoom, Blur, Flash (0.45 s default, configurable)
@@ -100,3 +105,9 @@ save the exported video. No analytics, no tracking, no network calls.
   friendly message instead of crashing
 - Persistent read grants are taken where the picker supports them, so
   projects stay valid after restart
+
+### Export reliability
+
+- Audio is trimmed/padded to the exact video sample count before muxing
+- Pre-stop PTS validation on both tracks; audio never overshoots the video
+- Real error messages surface the stage + root cause (render / encode / merge)

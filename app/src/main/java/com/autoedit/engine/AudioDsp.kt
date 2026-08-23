@@ -46,6 +46,13 @@ object AudioDsp {
         return PcmAudio(out, TARGET_RATE)
     }
 
+    /** Truncate or silence-pad PCM to exactly [target] samples (export sync). */
+    fun toExactLength(pcm: ShortArray, target: Int): ShortArray {
+        val out = ShortArray(target.coerceAtLeast(0))
+        System.arraycopy(pcm, 0, out, 0, minOf(pcm.size, out.size))
+        return out
+    }
+
     private fun sampleAt(a: PcmAudio, tSec: Double): Float {
         if (a.pcm.isEmpty()) return 0f
         val idx = (tSec * a.sampleRate).toInt().coerceIn(0, a.pcm.size - 1)

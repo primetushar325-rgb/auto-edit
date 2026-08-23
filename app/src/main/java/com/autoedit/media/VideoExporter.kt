@@ -14,10 +14,13 @@ import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.net.Uri
 import android.os.Build
+import android.util.Log
 import com.autoedit.engine.AudioDsp
+import com.autoedit.engine.ClipType
+import com.autoedit.engine.ProjectModel
+import java.io.IOException
 import com.autoedit.engine.EasingType
 import com.autoedit.engine.FormulaCatalog
-import com.autoedit.engine.ProjectModel
 import com.autoedit.engine.TimelineMath
 import com.autoedit.render.ExportRenderer
 import kotlinx.coroutines.Dispatchers
@@ -30,6 +33,27 @@ import java.util.Locale
 class VideoExporter(private val ctx: Context) {
 
     class ExportCancelled : Exception("cancelled")
+
+    /** Export failure with a stage + a human-readable root-cause message. */
+    class ExportException(val stage: String, message: String, cause: Throwable? = null) :
+        Exception(message, cause)
+
+    private companion object {
+        const val TAG = "AutoEdit"
+    }
+
+    private fun rootMsg(e: Throwable): String {
+        val parts = ArrayList<String>()
+        var cur: Throwable? = e
+        var depth = 0
+        while (cur != null && depth < 3) {
+            val m = cur.message
+            if (!m.isNullOrBlank()) parts.add(m)
+            cur = cur.cause
+            depth++
+        }
+        return if (parts.isEmpty()) e.javaClass.simpleName else parts.joinToString(" -> ")
+    }
 
     // MediaCodec.OUTPUT_FORMAT_MP4 (value 2) - not present in the SDK stub, so kept as a constant
     private val OUTPUT_FORMAT_MP4 = 2
@@ -55,7 +79,8 @@ class VideoExporter(private val ctx: Context) {
         val tmpFinal = File(ctx.cacheDir, "ae-final-$stamp.mp4")
         try {
             val p = project
-            val total = p.totalDuration()
+            val durations = p.clipDurations()
+            val total = durations.sumOf { it.coerceAtLeast(0.0) }
             if (total <= 0.0 || p.clips.isEmpty()) {
                 throw IllegalStateException("Add images before exporting.")
             }
@@ -63,6 +88,7 @@ class VideoExporter(private val ctx: Context) {
             val h = p.export.heightFor(p.aspect)
             val fps = p.export.fps
             val frames = (total * fps).toInt().coerceAtLeast(1)
+            val videoDurationUs = frames * (1_000_000L / fps)
             val easing = FormulaCatalog.byId(p.formulaId)?.easing ?: EasingType.EASE_IN_OUT
 
             var voicePcm: AudioDsp.PcmAudio? = null
@@ -80,7 +106,12 @@ class VideoExporter(private val ctx: Context) {
             var mixed: ShortArray? = null
             if (voicePcm != null || musicPcm != null) {
                 onProgress(0.08f, "Mixing audio…")
-                mixed = AudioDsp.mix(total, voicePcm, voiceCfg, musicPcm, musicCfg, p.duckMusic)
+                var m = AudioDsp.mix(total, voicePcm, voiceCfg, musicPcm, musicCfg, p.duckMusic)
+                // Trim/pad to EXACTLY the video sample count so the AAC track can
+                // never overshoot the video duration (remux mismatch guard).
+                val exact = frames * AudioDsp.TARGET_RATE / fps
+                m = AudioDsp.toExactLength(m, exact)
+                mixed = m
             }
 
             onProgress(0.1f, "Rendering frames…")
@@ -94,6 +125,13 @@ class VideoExporter(private val ctx: Context) {
                 ) { frac ->
                     onProgress(0.1f + frac * 0.75f, "Rendering… ${(frac * 100).toInt()}%")
                 }
+            } catch (e: ExportException) {
+                throw e
+            } catch (e: ExportCancelled) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "video encoding failed", e)
+                throw ExportException("video encoding", "Video rendering failed: ${rootMsg(e)}", e)
             } finally {
                 renderer.release()
                 cache.clear()
@@ -102,11 +140,25 @@ class VideoExporter(private val ctx: Context) {
 
             if (mixed != null) {
                 onProgress(0.87f, "Encoding audio…")
-                encodeAac(mixed, tmpAudio)
+                try {
+                    encodeAac(mixed, tmpAudio)
+                } catch (e: ExportException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.e(TAG, "audio encoding failed", e)
+                    throw ExportException("audio encoding", "Audio encoding failed: ${rootMsg(e)}", e)
+                }
             }
 
-            onProgress(0.93f, "Finalizing…")
-            remux(tmpVideo, if (mixed != null) tmpAudio else null, tmpFinal)
+            onProgress(0.93f, "Merging…")
+            try {
+                remux(tmpVideo, if (mixed != null) tmpAudio else null, tmpFinal, videoDurationUs)
+            } catch (e: ExportException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "mux merge failed", e)
+                throw ExportException("merge", "Could not merge audio and video: ${rootMsg(e)}", e)
+            }
 
             onProgress(0.97f, "Saving to Movies/Auto Edit…")
             val uri = saveToMediaStore(tmpFinal, p)
@@ -121,9 +173,13 @@ class VideoExporter(private val ctx: Context) {
         } catch (e: OutOfMemoryError) {
             onProgress(0f, "Out of memory")
             return Result.failure(e)
-        } catch (e: Exception) {
+        } catch (e: ExportException) {
             onProgress(0f, "Failed")
             return Result.failure(e)
+        } catch (e: Exception) {
+            Log.e(TAG, "export failed", e)
+            onProgress(0f, "Failed")
+            return Result.failure(ExportException("export", "Export failed: ${rootMsg(e)}", e))
         } finally {
             tmpVideo.delete()
             tmpAudio.delete()
@@ -153,6 +209,7 @@ class VideoExporter(private val ctx: Context) {
         var videoTrack = -1
         var muxerStarted = false
         var formatSeen = false
+        val videoDecoders = HashMap<Int, VideoFrameDecoder>()
         try {
             val fmt = MediaFormat.createVideoFormat("video/avc", w, h).apply {
                 setInteger(MediaFormat.KEY_BIT_RATE, p.export.videoBitrate)
@@ -193,13 +250,18 @@ class VideoExporter(private val ctx: Context) {
                 }
             }
 
+            val durations = p.clipDurations()
+            val maxSide = (maxOf(w, h) * 1.5f).toInt()
             for (i in 0 until frames) {
                 if (isCancelled() || Thread.currentThread().isInterrupted) throw ExportCancelled()
                 val t = i / fps.toDouble()
-                val state = TimelineMath.frameAt(t, p.clips.size, p.effectiveClipDuration(), p.transitionDurationSec)
+                val state = TimelineMath.frameAt(t, durations, p.transitionDurationSec)
                 cache.prepare(state, p)
                 canvas.drawColor(Color.BLACK)
-                renderer.render(canvas, p, state) { idx -> cache.get(idx) }
+                renderer.render(canvas, p, state, durations) { idx ->
+                    if (p.clips[idx].type == ClipType.VIDEO) videoFrameFor(videoDecoders, p, idx, state, maxSide)
+                    else cache.get(idx)
+                }
                 feedVideoInput(encoder, frameBmp, i.toLong() * 1_000_000_000L / fps) {
                     while (true) {
                         val o = encoder.dequeueOutputBuffer(info, 2_000)
@@ -241,7 +303,28 @@ class VideoExporter(private val ctx: Context) {
                 if (muxerStarted) muxer.stop()
             } catch (_: Exception) {}
             try { muxer.release() } catch (_: Exception) {}
+            for (d in videoDecoders.values) {
+                try { d.release() } catch (_: Exception) {}
+            }
+            videoDecoders.clear()
         }
+    }
+
+    private fun videoFrameFor(
+        decoders: HashMap<Int, VideoFrameDecoder>,
+        p: ProjectModel,
+        idx: Int,
+        state: com.autoedit.engine.FrameState,
+        maxSide: Int
+    ): Bitmap? {
+        val c = p.clips[idx]
+        if (c.type != ClipType.VIDEO) return null
+        val dec = decoders.getOrPut(idx) {
+            VideoFrameDecoder(ctx, c.uri, c.videoInMs, c.videoOutMs, maxSide).also { it.init() }
+        }
+        val localT = if (idx == state.clipIndex) state.localT else p.clipDurationAt(idx)
+        val neededMs = c.videoInMs + (localT * 1000.0).toLong()
+        return dec.nextFrame(neededMs * 1000L)
     }
 
     private inline fun feedVideoInput(
@@ -394,7 +477,7 @@ class VideoExporter(private val ctx: Context) {
 
     // ---------------------------------------------------------------- remux
 
-    private fun remux(video: File, audio: File?, out: File) {
+    private fun remux(video: File, audio: File?, out: File, videoDurationUs: Long) {
         val ev = MediaExtractor().apply { setDataSource(video.absolutePath) }
         val ea = audio?.let { MediaExtractor().apply { setDataSource(it.absolutePath) } }
         try {
@@ -423,6 +506,12 @@ class VideoExporter(private val ctx: Context) {
                 var nextA = if (ea != null) ea.sampleTime else Long.MAX_VALUE
                 var doneV = false
                 var doneA = ea == null
+                var videoMaxPts = 0L
+                var videoSamples = 0
+                var audioMaxPts = 0L
+                var audioSamples = 0
+                var audioSkipped = 0
+                val frameUs = 1_000_000L / 60
                 while (!doneV || !doneA) {
                     val takeV = if (doneA) true else if (doneV) false else nextV <= nextA
                     if (takeV) {
@@ -436,35 +525,58 @@ class VideoExporter(private val ctx: Context) {
                             info.presentationTimeUs = ev.sampleTime
                             info.flags = ev.sampleFlags
                             mux.writeSampleData(outV, buf, info)
+                            videoMaxPts = ev.sampleTime
+                            videoSamples++
                             nextV = ev.sampleTime
                         }
                     } else {
                         val a = ea!!
-                        buf.position(0)
-                        val size = a.readSampleData(buf, 0)
-                        if (size < 0) {
+                        // PTS guard: never write audio beyond the video duration
+                        // (AAC encoder delay can overshoot by a couple of frames).
+                        if (a.sampleTime >= videoDurationUs - frameUs) {
                             doneA = true
+                            audioSkipped++
                         } else {
-                            info.size = size
-                            info.offset = 0
-                            info.presentationTimeUs = a.sampleTime
-                            info.flags = a.sampleFlags
-                            mux.writeSampleData(outA, buf, info)
-                            nextA = a.sampleTime
+                            buf.position(0)
+                            val size = a.readSampleData(buf, 0)
+                            if (size < 0) {
+                                doneA = true
+                            } else {
+                                info.size = size
+                                info.offset = 0
+                                info.presentationTimeUs = a.sampleTime
+                                info.flags = a.sampleFlags
+                                mux.writeSampleData(outA, buf, info)
+                                audioMaxPts = a.sampleTime
+                                audioSamples++
+                                nextA = a.sampleTime
+                            }
                         }
                     }
+                }
+                // Pre-stop validation: timestamps must be sane (audio may be
+                // shorter, never longer than video + one frame).
+                val vDurSec = videoMaxPts / 1_000_000.0
+                val aDurSec = audioMaxPts / 1_000_000.0
+                Log.i(TAG, "remux: video ${videoSamples} samples / ${vDurSec}s, audio ${audioSamples} samples / ${aDurSec}s, skipped $audioSkipped")
+                if (audioMaxPts > videoDurationUs + 2 * frameUs) {
+                    Log.w(TAG, "remux: audio PTS ${audioMaxPts}us exceeded video ${videoDurationUs}us - check trim")
                 }
                 mux.stop()
             } finally {
                 try { mux.release() } catch (_: Exception) {}
             }
+        } catch (e: IOException) {
+            Log.e(TAG, "remux I/O failure", e)
+            throw ExportException("merge", "Merge failed (storage or file error): ${rootMsg(e)}", e)
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "remux failed", e)
+            throw ExportException("merge", "Merge failed: ${rootMsg(e)}", e)
         } finally {
             try { ev.release() } catch (_: Exception) {}
             try { ea?.release() } catch (_: Exception) {}
         }
     }
-
-    // ---------------------------------------------------------------- save
 
     private fun saveToMediaStore(src: File, p: ProjectModel): Uri {
         val values = ContentValues()

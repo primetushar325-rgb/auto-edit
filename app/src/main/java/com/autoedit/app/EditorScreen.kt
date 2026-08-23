@@ -131,6 +131,9 @@ fun EditorScreen(vm: AppViewModel) {
     val pickMusic = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) {
         it?.let { u -> vm.pickMusic(u) }
     }
+    val pickVideo = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) {
+        it?.let { u -> vm.openVideoPicker(u) }
+    }
     val storagePerm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         vm.storagePermissionResult(it)
     }
@@ -240,11 +243,10 @@ fun EditorScreen(vm: AppViewModel) {
                     if (p != null && p.clips.isNotEmpty()) {
                         val state = TimelineMath.frameAt(
                             playTime.toDouble(),
-                            p.clips.size,
-                            p.effectiveClipDuration(),
+                            p.clipDurations(),
                             p.transitionDurationSec
                         )
-                        drawFrame(p, state, previewBmps.value)
+                        drawFrame(p, state, p.clipDurations(), previewBmps.value)
                     } else {
                         drawRect(Color.Black)
                     }
@@ -316,6 +318,7 @@ fun EditorScreen(vm: AppViewModel) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     ActionChip("IMAGES", "+", ui.clipCount == 0) { launchImages() }
                     ActionChip("FORMULA", "\u2699") { vm.setSheet(showFormula = true) }
+                    ActionChip("VIDEO", "+") { pickVideo.launch("video/*") }
                     ActionChip("VOICE", if (ui.voice != null) "\u2713" else "+") { pickVoice.launch("audio/*") }
                     ActionChip("MUSIC", if (ui.music != null) "\u2713" else "+") { pickMusic.launch("audio/*") }
                 }
@@ -388,7 +391,12 @@ fun EditorScreen(vm: AppViewModel) {
                         )
                     }
                 } else {
-                    TimelineRow(vm = vm, ui = ui, onClipClick = { i -> vm.setSheet(showClipMenu = i) })
+                    TimelineRow(
+                        vm = vm,
+                        ui = ui,
+                        onClipClick = { i -> vm.setSheet(showClipMenu = i) },
+                        onJunctionClick = { i -> vm.setSheet(showJunction = i) }
+                    )
                 }
                 Spacer(Modifier.height(14.dp))
 
@@ -412,6 +420,9 @@ fun EditorScreen(vm: AppViewModel) {
     if (ui.showExport || ui.exporting) ExportPanel(vm)
     if (ui.showRename) RenameDialog(vm)
     ui.showClipMenu?.let { i -> ClipMenuDialog(vm, i) }
+    ui.showZoomEditor?.let { i -> ZoomEditorDialog(vm, i) }
+    ui.showJunction?.let { i -> JunctionPickerDialog(vm, i) }
+    ui.pendingVideo?.let { VideoTrimDialog(vm) }
 }
 
 @Composable
@@ -463,11 +474,10 @@ private fun FullscreenPreview(
             if (p != null && p.clips.isNotEmpty()) {
                 val state = TimelineMath.frameAt(
                     playTime.toDouble(),
-                    p.clips.size,
-                    p.effectiveClipDuration(),
+                    p.clipDurations(),
                     p.transitionDurationSec
                 )
-                drawFrame(p, state, bmps)
+                drawFrame(p, state, p.clipDurations(), bmps)
             } else {
                 drawRect(Color.Black)
             }
@@ -503,7 +513,12 @@ private fun vm_fmtTime(sec: Double): String {
 }
 
 @Composable
-private fun TimelineRow(vm: AppViewModel, ui: AppViewModel.Ui, onClipClick: (Int) -> Unit) {
+private fun TimelineRow(
+    vm: AppViewModel,
+    ui: AppViewModel.Ui,
+    onClipClick: (Int) -> Unit,
+    onJunctionClick: (Int) -> Unit
+) {
     val thumbs = remember { mutableStateOf<Map<String, ImageBitmap>>(emptyMap()) }
     LazyRow(
         modifier = Modifier
@@ -514,9 +529,9 @@ private fun TimelineRow(vm: AppViewModel, ui: AppViewModel.Ui, onClipClick: (Int
     ) {
         items(ui.clipInfos, key = { "clip-${it.index}" }) { info ->
             val thumb = thumbs.value[info.uri]
-            LaunchedEffect(info.uri) {
+            LaunchedEffect(info.uri, info.isVideo) {
                 if (thumbs.value[info.uri] == null) {
-                    val b = vm.loadThumb(info.uri)
+                    val b = vm.loadThumb(info.uri, info.isVideo)
                     if (b != null) thumbs.value = thumbs.value + (info.uri to b)
                 }
             }
@@ -538,24 +553,51 @@ private fun TimelineRow(vm: AppViewModel, ui: AppViewModel.Ui, onClipClick: (Int
                     if (thumb != null) {
                         Image(
                             bitmap = thumb,
-                            contentDescription = "Image ${info.index + 1}",
+                            contentDescription = if (info.isVideo) "Video ${info.index + 1}" else "Image ${info.index + 1}",
                             contentScale = ContentScale.Crop,
                             modifier = Modifier
                                 .fillMaxSize()
                                 .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
                         )
                     } else {
-                        Text("IMG", style = MaterialTheme.typography.labelSmall, color = AeTextDim)
+                        Text(
+                            if (info.isVideo) "VID" else "IMG",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = AeTextDim
+                        )
                     }
-                    if (info.transitionBefore) {
+                    // junction marker: tap to pick the transition for this gap (CapCut-style)
+                    if (info.index > 0) {
                         Box(
                             modifier = Modifier
                                 .align(Alignment.TopStart)
                                 .padding(4.dp)
-                                .size(8.dp)
-                                .clip(CircleShape)
-                                .background(AeGold)
-                        )
+                                .clip(RoundedCornerShape(5.dp))
+                                .background(
+                                    if (info.junctionLabel != null) AeGold else AeCardHi
+                                )
+                                .clickable { onJunctionClick(info.index) }
+                                .padding(horizontal = 5.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = if (info.junctionLabel != null) info.junctionLabel!!.take(8) else "\u25C6",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (info.junctionLabel != null) AeBlack else AeTextDim,
+                                maxLines = 1
+                            )
+                        }
+                    }
+                    if (info.isVideo) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(4.dp)
+                                .clip(RoundedCornerShape(5.dp))
+                                .background(Color.Black.copy(alpha = 0.7f))
+                                .padding(horizontal = 5.dp, vertical = 2.dp)
+                        ) {
+                            Text("\u25B6 VID", style = MaterialTheme.typography.labelSmall, color = AeGold)
+                        }
                     }
                 }
                 Column(
@@ -565,14 +607,16 @@ private fun TimelineRow(vm: AppViewModel, ui: AppViewModel.Ui, onClipClick: (Int
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Text(
-                        text = "IMG %03d".format(info.index + 1),
+                        text = (if (info.isVideo) "VID %03d" else "IMG %03d").format(info.index + 1),
                         style = MaterialTheme.typography.labelSmall,
-                        color = AeText
+                        color = AeText,
+                        maxLines = 1
                     )
                     Text(
                         text = info.motionLabel,
                         style = MaterialTheme.typography.labelSmall,
-                        color = AeGold
+                        color = if (info.zoomLabel != null) AeGold else AeTextDim,
+                        maxLines = 1
                     )
                 }
             }

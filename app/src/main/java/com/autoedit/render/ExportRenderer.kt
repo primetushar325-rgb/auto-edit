@@ -53,10 +53,17 @@ class ExportRenderer(
         }
     }
 
-    fun render(canvas: Canvas, p: ProjectModel, state: FrameState, bitmaps: (Int) -> Bitmap?) {
+    fun render(
+        canvas: Canvas,
+        p: ProjectModel,
+        state: FrameState,
+        durations: List<Double>,
+        bitmaps: (Int) -> Bitmap?
+    ) {
         canvas.drawColor(Color.BLACK)
-        val clipDur = p.effectiveClipDuration()
-        val transition = p.transition
+        val clipDur = durations.getOrNull(state.clipIndex) ?: p.effectiveClipDuration()
+        val prevDur = if (state.prevIndex >= 0) durations.getOrNull(state.prevIndex) ?: clipDur else clipDur
+        val transition = p.junctionTransitions[state.clipIndex] ?: p.transition
         if (state.prevIndex >= 0 && transition != TransitionType.NONE) {
             val b = TimelineMath.easing(state.blend, EasingType.EASE_IN_OUT).toFloat()
             val prev = state.prevIndex
@@ -64,31 +71,31 @@ class ExportRenderer(
                 TransitionType.FADE ->
                     drawClip(canvas, bitmaps, p, state.clipIndex, state.localT, clipDur, (b * 255).toInt(), 1f, 0f, 0f)
                 TransitionType.CROSS_DISSOLVE -> {
-                    drawClip(canvas, bitmaps, p, prev, clipDur, clipDur, 255, 1f, 0f, 0f)
+                    drawClip(canvas, bitmaps, p, prev, prevDur, clipDur, 255, 1f, 0f, 0f)
                     drawClip(canvas, bitmaps, p, state.clipIndex, state.localT, clipDur, (b * 255).toInt(), 1f, 0f, 0f)
                 }
                 TransitionType.BLUR -> {
-                    drawClip(canvas, bitmaps, p, prev, clipDur, clipDur, 255, 1f + 0.06f * b, 0f, 0f)
+                    drawClip(canvas, bitmaps, p, prev, prevDur, clipDur, 255, 1f + 0.06f * b, 0f, 0f)
                     drawClip(canvas, bitmaps, p, state.clipIndex, state.localT, clipDur, (b * 255).toInt(), 1f, 0f, 0f)
                 }
                 TransitionType.SLIDE_LEFT -> {
-                    drawClip(canvas, bitmaps, p, prev, clipDur, clipDur, 255, 1f, -b * w * 0.55f, 0f)
+                    drawClip(canvas, bitmaps, p, prev, prevDur, clipDur, 255, 1f, -b * w * 0.55f, 0f)
                     drawClip(canvas, bitmaps, p, state.clipIndex, state.localT, clipDur, 255, 1f, (1f - b) * w, 0f)
                 }
                 TransitionType.SLIDE_RIGHT -> {
-                    drawClip(canvas, bitmaps, p, prev, clipDur, clipDur, 255, 1f, b * w * 0.55f, 0f)
+                    drawClip(canvas, bitmaps, p, prev, prevDur, clipDur, 255, 1f, b * w * 0.55f, 0f)
                     drawClip(canvas, bitmaps, p, state.clipIndex, state.localT, clipDur, 255, 1f, -(1f - b) * w, 0f)
                 }
                 TransitionType.SLIDE_UP -> {
-                    drawClip(canvas, bitmaps, p, prev, clipDur, clipDur, 255, 1f, 0f, -b * h * 0.55f)
+                    drawClip(canvas, bitmaps, p, prev, prevDur, clipDur, 255, 1f, 0f, -b * h * 0.55f)
                     drawClip(canvas, bitmaps, p, state.clipIndex, state.localT, clipDur, 255, 1f, 0f, (1f - b) * h)
                 }
                 TransitionType.SLIDE_DOWN -> {
-                    drawClip(canvas, bitmaps, p, prev, clipDur, clipDur, 255, 1f, 0f, b * h * 0.55f)
+                    drawClip(canvas, bitmaps, p, prev, prevDur, clipDur, 255, 1f, 0f, b * h * 0.55f)
                     drawClip(canvas, bitmaps, p, state.clipIndex, state.localT, clipDur, 255, 1f, 0f, -(1f - b) * h)
                 }
                 TransitionType.ZOOM -> {
-                    drawClip(canvas, bitmaps, p, prev, clipDur, clipDur, 255, 1f, 0f, 0f)
+                    drawClip(canvas, bitmaps, p, prev, prevDur, clipDur, 255, 1f, 0f, 0f)
                     drawClip(canvas, bitmaps, p, state.clipIndex, state.localT, clipDur, (b * 255).toInt(), 1f + 0.12f * (1f - b), 0f, 0f)
                 }
                 TransitionType.FLASH -> {
@@ -120,7 +127,7 @@ class ExportRenderer(
     ) {
         if (alpha <= 0) return
         val bmp = bitmaps(idx) ?: return
-        val motion = p.clips.getOrNull(idx)?.motion
+        val motion = p.clips.getOrNull(idx)?.resolvedMotion()
         val tr = FrameMath.transformAt(motion, localT, clipDur, easing)
         val cover = maxOf(w.toFloat() / bmp.width, h.toFloat() / bmp.height)
         val s = cover * tr.scale * extraScale

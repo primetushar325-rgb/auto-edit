@@ -54,6 +54,55 @@ object ImageLoader {
         o.outWidth > 0 && o.outHeight > 0
     }.getOrDefault(false)
 
+    /** Duration of a video file in ms (0 on failure). */
+    fun videoDurationMs(ctx: Context, uri: String): Long {
+        val r = android.media.MediaMetadataRetriever()
+        return try {
+            val pfd = ctx.contentResolver.openFileDescriptor(Uri.parse(uri), "r") ?: return 0L
+            try {
+                r.setDataSource(pfd.fileDescriptor)
+            } finally {
+                try { pfd.close() } catch (_: Exception) {}
+            }
+            val ms = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
+                ?.toLongOrNull() ?: 0L
+            if (ms in 200..(60 * 60 * 1000)) ms else 0L
+        } catch (e: Exception) {
+            0L
+        } finally {
+            try { r.release() } catch (_: Exception) {}
+        }
+    }
+
+    /** A thumbnail frame from a video at [timeMs] (for timeline/preview cards). */
+    fun videoThumb(ctx: Context, uri: String, timeMs: Long, maxDim: Int = 320): Bitmap? = runCatching {
+        val r = android.media.MediaMetadataRetriever()
+        try {
+            val pfd = ctx.contentResolver.openFileDescriptor(Uri.parse(uri), "r") ?: return@runCatching null
+            try {
+                r.setDataSource(pfd.fileDescriptor)
+            } finally {
+                try { pfd.close() } catch (_: Exception) {}
+            }
+            val frame = r.getFrameAtTime(timeMs * 1000, android.media.MediaMetadataRetriever.OPTION_CLOSEST)
+                ?: return@runCatching null
+            // scale down
+            if (maxOf(frame.width, frame.height) <= maxDim) frame
+            else {
+                val sc = maxDim.toFloat() / maxOf(frame.width, frame.height)
+                val w = (frame.width * sc).toInt().coerceAtLeast(16)
+                val h = (frame.height * sc).toInt().coerceAtLeast(16)
+                val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                val c = android.graphics.Canvas(out)
+                c.drawBitmap(frame, null, android.graphics.RectF(0f, 0f, w.toFloat(), h.toFloat()), null)
+                frame.recycle()
+                out
+            }
+        } finally {
+            try { r.release() } catch (_: Exception) {}
+        }
+    }.getOrNull()
+
     /** Fast duration estimate (ms) from media metadata, 0 on failure. */
     fun estimateDurationMs(ctx: Context, uri: String): Long {
         val retriever = android.media.MediaMetadataRetriever()
