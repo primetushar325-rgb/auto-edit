@@ -53,7 +53,7 @@ class VideoFrameDecoder(
                 val pfd = ctx.contentResolver.openFileDescriptor(android.net.Uri.parse(uriOrPath), "r")
                     ?: throw Exception("Unable to open this video file.")
                 fdHolder = pfd
-                ext.setDataSource(pfd.fd)
+                ext.setDataSource(pfd as android.content.res.AssetFileDescriptor)
             }
         } catch (e: Exception) {
             releaseFd()
@@ -104,7 +104,7 @@ class VideoFrameDecoder(
         fdHolder = null
         if (h != null) {
             runCatching {
-                (h as? android.content.res.AssetFileDescriptor)?.close()
+                (h as? android.os.ParcelFileDescriptor)?.close()
             }.onFailure { Log.w(TAG, "fd close failed", it) }
         }
     }

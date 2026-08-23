@@ -56,7 +56,7 @@ object ImageLoader {
     /** Duration of a video file in ms (0 on failure). */
     fun videoDurationMs(ctx: Context, uri: String): Long {
         val r = android.media.MediaMetadataRetriever()
-        var pfd: android.content.res.AssetFileDescriptor? = null
+        var pfd: android.os.ParcelFileDescriptor? = null
         return try {
             pfd = setupRetriever(ctx, uri, r)
             val ms = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
@@ -73,7 +73,7 @@ object ImageLoader {
     /** A thumbnail frame from a video at [timeMs] (for timeline/preview cards). */
     fun videoThumb(ctx: Context, uri: String, timeMs: Long, maxDim: Int = 320): Bitmap? = runCatching {
         val r = android.media.MediaMetadataRetriever()
-        var pfd: android.content.res.AssetFileDescriptor? = null
+        var pfd: android.os.ParcelFileDescriptor? = null
         try {
             pfd = setupRetriever(ctx, uri, r)
             val frame = r.getFrameAtTime(timeMs * 1000, android.media.MediaMetadataRetriever.OPTION_CLOSEST)
@@ -96,7 +96,7 @@ object ImageLoader {
         }
     }.getOrNull()
 
-    private fun setupRetriever(ctx: Context, uriOrPath: String, r: android.media.MediaMetadataRetriever): android.content.res.AssetFileDescriptor? {
+    private fun setupRetriever(ctx: Context, uriOrPath: String, r: android.media.MediaMetadataRetriever): android.os.ParcelFileDescriptor? {
         return if (ProjectStorage.isPath(uriOrPath)) {
             if (!java.io.File(uriOrPath).exists()) throw Exception("File missing: $uriOrPath")
             r.setDataSource(uriOrPath)
@@ -104,7 +104,7 @@ object ImageLoader {
         } else {
             val pfd = ctx.contentResolver.openFileDescriptor(android.net.Uri.parse(uriOrPath), "r")
                 ?: throw Exception("Unable to open: $uriOrPath")
-            r.setDataSource(pfd.fd)
+            r.setDataSource(pfd as android.content.res.AssetFileDescriptor)
             pfd // caller keeps it open until done with the retriever
         }
     }

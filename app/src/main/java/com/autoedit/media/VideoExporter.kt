@@ -320,7 +320,7 @@ class VideoExporter(private val ctx: Context) {
                 feedVideoInput(encoder, frameBmp, pixels, w, h, ptsNs) {
                     while (true) {
                         val o = encoder.dequeueOutputBuffer(info, 2_000)
-                        if (o == MediaCodec.INFO_OUTPUT_TIMEOUT) break
+                        if (o == MediaCodec.INFO_TRY_AGAIN_LATER) break
                         if (o == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) noteVideoFormat()
                         if (o == 0) {
                             if (info.flags and MediaCodec.INFO_OUTPUT_FORMAT_CHANGED != 0) noteVideoFormat()
@@ -357,7 +357,7 @@ class VideoExporter(private val ctx: Context) {
             feedVideoInput(encoder, frameBmp, pixels, w, h, frames.toLong() * 1_000_000_000L / fps, isEos = true) {
                 while (true) {
                     val o = encoder.dequeueOutputBuffer(info, 5_000)
-                    if (o == MediaCodec.INFO_OUTPUT_TIMEOUT) break
+                    if (o == MediaCodec.INFO_TRY_AGAIN_LATER) break
                     if (o == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) noteVideoFormat()
                     if (o == 0) {
                         if (info.flags and MediaCodec.INFO_OUTPUT_FORMAT_CHANGED != 0) noteVideoFormat()
