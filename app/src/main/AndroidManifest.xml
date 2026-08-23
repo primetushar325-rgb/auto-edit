@@ -1,11 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Only needed on Android 11-12 (API 30-32) for the system photo picker on old pickers.
-         Android 13+ photo picker needs no permission at all. -->
-    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" android:maxSdkVersion="32" />
-    <!-- Only needed on Android 8-10 (API 26-29) to save exported video to shared storage.
-         Android 10+ (API 29+) MediaStore needs no permission. -->
+    <!-- Only needed on Android 8-9 (API 26-28) to save exported video to shared storage.
+         Android 10+ (API 29+) MediaStore needs no permission.
+         Image picking uses the system Photo Picker (API 33+) / Storage Access
+         Framework (API 26+) - neither requires any permission. -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
 
     <application

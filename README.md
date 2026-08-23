@@ -42,7 +42,7 @@ Built-in formulas (easy to extend — one data object each):
 
 ## Features
 
-- **Multi-image import** via the Android system photo picker (1…500+ images), reorder, delete, re-add
+- **Multi-image import** via the Android system Photo Picker (API 33+, max clamped to the device limit) with a Storage-Access-Fallback for API 26-32 (persistent URI grants), reorder, delete, re-add — zero permissions
 - **Timeline** with thumbnails, image numbers, motion indicators, transition markers
 - **Preview player** with play / pause / restart / fullscreen — mirrors the export exactly
 - **10 transitions**: None, Fade, Cross Dissolve, Slide L/R/U/D, Zoom, Blur, Flash (0.45 s default, configurable)
@@ -87,5 +87,16 @@ malformed files).
 
 ## Privacy
 
-No permissions on Android 10+ (scoped storage + photo picker). No analytics,
-no tracking, no network calls. `allowBackup=false`.
+No permissions on Android 10+ (system Photo Picker / Storage Access Framework /
+scoped storage). On Android 8-9, only `WRITE_EXTERNAL_STORAGE` is requested to
+save the exported video. No analytics, no tracking, no network calls.
+`allowBackup=false`.
+
+### Import safety
+
+- Picker max is clamped to `MediaStore.getPickImagesMaxLimit()` (avoids the
+  Jetpack `PickMultipleVisualMedia` crash)
+- URIs are validated; MIME-filtered; corrupted files are reported with a
+  friendly message instead of crashing
+- Persistent read grants are taken where the picker supports them, so
+  projects stay valid after restart

@@ -45,6 +45,15 @@ object ImageLoader {
         return name.ifBlank { fallback }
     }
 
+    /** Quick bounds-only decode check: can this URI be decoded as an image? */
+    fun isValidImage(ctx: Context, uri: String): Boolean = runCatching {
+        val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        ctx.contentResolver.openInputStream(Uri.parse(uri))?.use {
+            BitmapFactory.decodeStream(it, null, o)
+        }
+        o.outWidth > 0 && o.outHeight > 0
+    }.getOrDefault(false)
+
     /** Fast duration estimate (ms) from media metadata, 0 on failure. */
     fun estimateDurationMs(ctx: Context, uri: String): Long {
         val retriever = android.media.MediaMetadataRetriever()

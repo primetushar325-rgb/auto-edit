@@ -1,10 +1,8 @@
 package com.autoedit.app
 
 import android.Manifest
-import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -109,10 +107,23 @@ fun EditorScreen(vm: AppViewModel) {
         if (got.isNotEmpty()) previewBmps.value = (loaded + got).filterKeys { it in need }
     }
 
+    // Robust image picker (see ImagePicker.kt). The Jetpack
+    // PickMultipleVisualMedia(maxItems) contract throws IllegalArgumentException
+    // at launch on Android 13+ whenever maxItems > the device's
+    // MediaStore.getPickImagesMaxLimit() (default 100) - that was the
+    // ADD IMAGES crash. We build our own intents with a clamped limit.
     val pickImages = rememberLauncherForActivityResult(
-        ActivityResultContracts.PickMultipleVisualMedia(500)
-    ) { uris ->
-        if (!uris.isNullOrEmpty()) vm.addImages(uris)
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        try {
+            val uris = ImagePicker.parseUris(result.resultCode, result.data)
+            if (uris.isNotEmpty()) {
+                ImagePicker.persistReadPermissions(ctx, uris)
+                vm.addImages(uris)
+            }
+        } catch (e: Exception) {
+            vm.toast("Some images could not be imported")
+        }
     }
     val pickVoice = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) {
         it?.let { u -> vm.pickVoice(u) }
@@ -123,13 +134,6 @@ fun EditorScreen(vm: AppViewModel) {
     val storagePerm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         vm.storagePermissionResult(it)
     }
-    val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) {
-            pickImages.launch(PickVisualMediaRequest())
-        } else {
-            vm.toast("Photo access is required on this Android version")
-        }
-    }
     LaunchedEffect(ui.needStoragePermission) {
         if (ui.needStoragePermission) {
             storagePerm.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
@@ -137,13 +141,23 @@ fun EditorScreen(vm: AppViewModel) {
     }
 
     fun launchImages() {
-        if (Build.VERSION.SDK_INT in 30..32) {
-            if (ctx.checkSelfPermission(Manifest.permission.READ_MEDIA_IMAGES) != PackageManager.PERMISSION_GRANTED) {
-                permLauncher.launch(Manifest.permission.READ_MEDIA_IMAGES)
-                return
+        try {
+            val intent = if (ImagePicker.photoPickerAvailable(ctx)) {
+                ImagePicker.createIntent(ctx)
+            } else {
+                ImagePicker.fallbackIntent(ctx)
             }
+            pickImages.launch(intent)
+        } catch (e: android.content.ActivityNotFoundException) {
+            // ROM without the preferred picker - fall back to SAF
+            try {
+                pickImages.launch(ImagePicker.fallbackIntent(ctx))
+            } catch (e2: Exception) {
+                vm.toast("Could not open the image picker on this device")
+            }
+        } catch (e: Exception) {
+            vm.toast("Could not open the image picker on this device")
         }
-        pickImages.launch(PickVisualMediaRequest())
     }
 
     val proj = remember(ui.version) { vm.projectSnapshot() }

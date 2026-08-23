@@ -217,6 +217,7 @@ class AppViewModel(app: Application) : ViewModel() {
         val f = FormulaCatalog.byId(p.formulaId) ?: FormulaCatalog.F01
         val planner = MotionPlanner()
         val newClips = p.clips.toMutableList()
+        val addedUris = mutableListOf<String>()
         var added = 0
         var skipped = 0
         for (u in uris) {
@@ -230,6 +231,7 @@ class AppViewModel(app: Application) : ViewModel() {
             val i = newClips.size
             val motion = planner.plan(1, f, p.motionSeed * 31L + i * 1_000_003L)[0]
             newClips += ClipRef(uri = s, motion = motion)
+            addedUris += s
             added++
         }
         if (added == 0 && skipped > 0) {
@@ -245,6 +247,14 @@ class AppViewModel(app: Application) : ViewModel() {
         val totalStr = fmtTime(total)
         toast(if (added >= 100) "$added images imported • Total duration: $totalStr"
               else "+$added image${if (added > 1) "s" else ""} added ($totalStr total)")
+        // Background validation: corrupted/unsupported images must never crash
+        // the import - report them with a friendly message instead.
+        mainScope.launch {
+            val bad = withContext(Dispatchers.IO) {
+                addedUris.count { uri -> !com.autoedit.media.ImageLoader.isValidImage(app, uri) }
+            }
+            if (bad > 0) toast("$bad image(s) could not be imported")
+        }
     }
 
     fun removeClip(i: Int) {
