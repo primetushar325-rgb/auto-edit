@@ -19,6 +19,8 @@ import android.net.Uri
  *   time (holds the last frame after the segment ends - caller stops first).
  * - The returned Bitmap is REUSED: it is only valid until the next call.
  */
+private const val TAG = "AutoEdit"
+
 class VideoFrameDecoder(
     private val ctx: Context,
     private val uri: String,
@@ -185,6 +187,11 @@ class VideoFrameDecoder(
                 val r = (yv + 1.402 * v).toInt().coerceIn(0, 255)
                 val g = (yv - 0.344 * u - 0.714 * v).toInt().coerceIn(0, 255)
                 val b = (yv + 1.772 * u).toInt().coerceIn(0, 255)
+                if (p >= out.size) {
+                    // safety net: plane/stride mismatch - stop filling, log once
+                    android.util.Log.w(TAG, "yuvToArgb: pixel $p out of bounds (size=${out.size}) - clamping")
+                    return
+                }
                 out[p++] = 0xFF000000.toInt() or (r shl 16) or (g shl 8) or b
             }
         }

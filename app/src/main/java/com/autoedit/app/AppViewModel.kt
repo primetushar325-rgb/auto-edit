@@ -314,16 +314,19 @@ class AppViewModel(app: Application) : ViewModel() {
         val planner = MotionPlanner()
         mutate { pr ->
             val planned = planner.plan(pr.clips.size, f, pr.motionSeed)
+            // NOTE: the formula sets motion + clip duration only. It deliberately
+            // does NOT overwrite the project transition - that stays a user choice
+            // (per-junction picker / project default). This is what stopped the
+            // "unexpected white flash" (FLASH from applied formulas bleeding into
+            // every cut without the user selecting a transition).
             pr.copy(
                 formulaId = f.id,
                 clipDurationSec = f.clipDurationSec,
-                transition = f.transition,
-                transitionDurationSec = f.transitionDurationSec,
                 clips = pr.clips.mapIndexed { i, c -> c.copy(motion = planned[i]) }
             )
         }
         _ui.update { it.copy(showFormula = false) }
-        toast("${f.name} • ${f.tagline} applied")
+        toast("${f.name} • ${f.tagline} applied (transition unchanged)")
     }
 
     fun randomizeAgain() {

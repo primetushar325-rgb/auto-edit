@@ -234,3 +234,45 @@ class MixedTimelineTest {
         assertEquals(3, trimmed[3].toInt())
     }
 }
+
+    // ------------------------------------------------ off-by-one / overflow audit
+
+    @Test
+    fun `exact sample count for the reported 21 point 6 second project`() {
+        // 21.6s * 48000 = 1,036,800 samples - the buffer the field crash hit.
+        // The sample loop must be `0 until n` over an array of exactly n.
+        assertEquals(1_036_800, AudioDsp.exactSampleCount(21.6))
+        val pcm = AudioDsp.toExactLength(ShortArray(1_036_801) { it.toShort() }, 1_036_800)
+        assertEquals(1_036_800, pcm.size)
+        // last valid index is size - 1; sampleAt clamps anything else
+        val audio = AudioDsp.PcmAudio(pcm, 48000)
+        val ok = AudioDsp.mix(21.6, audio, AudioConfig("u", "v", 21.6), null, null, false)
+        assertEquals(1_036_800, ok.size)
+    }
+
+    @Test
+    fun `exact sample count survives long projects (int overflow guard)`() {
+        // 25 minutes: 1500s * 48000 = 72,000,000 (fine in Int)
+        assertEquals(72_000_000, AudioDsp.exactSampleCount(1500.0))
+        // 12.5 hours: 45000s * 48000 = 2,160,000,000 > Int.MAX - must clamp, not overflow
+        val n = AudioDsp.exactSampleCount(45000.0)
+        assertTrue("got $n", n in 0 until 2_147_483_647)
+        assertEquals(0, AudioDsp.exactSampleCount(0.0))
+    }
+
+    @Test
+    fun `default project transition is never flash (no surprise white flash)`() {
+        val p = ProjectModel("p", "p", 0, 0, clips = List(3) { ClipRef(uri = "u$it") })
+        assertEquals(TransitionType.CROSS_DISSOLVE, p.transition)
+        // junctions empty -> every junction resolves to the non-flash default
+        for (i in 0..3) assertEquals(TransitionType.CROSS_DISSOLVE, p.junctionTransition(i) ?: TransitionType.NONE)
+    }
+
+    @Test
+    fun `mix output is exactly the requested length for boundary durations`() {
+        val voice = AudioDsp.PcmAudio(ShortArray(48000) { 1000 }, 48000)
+        for (secs in listOf(0.5, 1.0, 3.0, 21.6)) {
+            val out = AudioDsp.mix(secs, voice, AudioConfig("u", "v", 1.0), null, null, false)
+            assertEquals("secs=$secs", (secs * 48000).toLong().toInt(), out.size.toLong().toInt())
+        }
+    }

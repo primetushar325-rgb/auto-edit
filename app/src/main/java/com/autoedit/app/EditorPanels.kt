@@ -184,7 +184,7 @@ private fun FormulaCard(f: Formula, isActive: Boolean, onApply: () -> Unit) {
         Spacer(Modifier.height(10.dp))
         SpecRow("MOTION", if (f.motionMode == com.autoedit.engine.MotionMode.RANDOM) "Random" else "Fixed")
         SpecRow("ZOOM", f.zoomRangeLabel())
-        SpecRow("TRANSITION", "${f.transition.label()} \u2022 ${"%.2f".format(f.transitionDurationSec)}s")
+        SpecRow("TRANSITION", "${f.transition.label()} \u2022 ${"%.2f".format(f.transitionDurationSec)}s (suggested \u2013 your transition is kept)")
         SpecRow("DURATION", "${"%.0f".format(f.clipDurationSec)} sec / image")
         Spacer(Modifier.height(12.dp))
         GoldButton(text = "APPLY FORMULA", modifier = Modifier.fillMaxWidth(), onClick = onApply)

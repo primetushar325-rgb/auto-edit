@@ -237,6 +237,7 @@ fun EditorScreen(vm: AppViewModel) {
                         .fillMaxWidth()
                         .aspectRatio(previewAspectRatio(ui))
                         .clip(RoundedCornerShape(18.dp))
+                        .background(Color.Black)
                         .clickable { vm.setPlaying(!ui.playing) }
                 ) {
                     val p = proj

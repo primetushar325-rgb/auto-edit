@@ -71,31 +71,31 @@ class ExportRenderer(
                 TransitionType.FADE ->
                     drawClip(canvas, bitmaps, p, state.clipIndex, state.localT, clipDur, (b * 255).toInt(), 1f, 0f, 0f)
                 TransitionType.CROSS_DISSOLVE -> {
-                    drawClip(canvas, bitmaps, p, prev, prevDur, clipDur, 255, 1f, 0f, 0f)
+                    drawClip(canvas, bitmaps, p, prev, prevDur, prevDur, 255, 1f, 0f, 0f)
                     drawClip(canvas, bitmaps, p, state.clipIndex, state.localT, clipDur, (b * 255).toInt(), 1f, 0f, 0f)
                 }
                 TransitionType.BLUR -> {
-                    drawClip(canvas, bitmaps, p, prev, prevDur, clipDur, 255, 1f + 0.06f * b, 0f, 0f)
+                    drawClip(canvas, bitmaps, p, prev, prevDur, prevDur, 255, 1f + 0.06f * b, 0f, 0f)
                     drawClip(canvas, bitmaps, p, state.clipIndex, state.localT, clipDur, (b * 255).toInt(), 1f, 0f, 0f)
                 }
                 TransitionType.SLIDE_LEFT -> {
-                    drawClip(canvas, bitmaps, p, prev, prevDur, clipDur, 255, 1f, -b * w * 0.55f, 0f)
+                    drawClip(canvas, bitmaps, p, prev, prevDur, prevDur, 255, 1f, -b * w * 0.55f, 0f)
                     drawClip(canvas, bitmaps, p, state.clipIndex, state.localT, clipDur, 255, 1f, (1f - b) * w, 0f)
                 }
                 TransitionType.SLIDE_RIGHT -> {
-                    drawClip(canvas, bitmaps, p, prev, prevDur, clipDur, 255, 1f, b * w * 0.55f, 0f)
+                    drawClip(canvas, bitmaps, p, prev, prevDur, prevDur, 255, 1f, b * w * 0.55f, 0f)
                     drawClip(canvas, bitmaps, p, state.clipIndex, state.localT, clipDur, 255, 1f, -(1f - b) * w, 0f)
                 }
                 TransitionType.SLIDE_UP -> {
-                    drawClip(canvas, bitmaps, p, prev, prevDur, clipDur, 255, 1f, 0f, -b * h * 0.55f)
+                    drawClip(canvas, bitmaps, p, prev, prevDur, prevDur, 255, 1f, 0f, -b * h * 0.55f)
                     drawClip(canvas, bitmaps, p, state.clipIndex, state.localT, clipDur, 255, 1f, 0f, (1f - b) * h)
                 }
                 TransitionType.SLIDE_DOWN -> {
-                    drawClip(canvas, bitmaps, p, prev, prevDur, clipDur, 255, 1f, 0f, b * h * 0.55f)
+                    drawClip(canvas, bitmaps, p, prev, prevDur, prevDur, 255, 1f, 0f, b * h * 0.55f)
                     drawClip(canvas, bitmaps, p, state.clipIndex, state.localT, clipDur, 255, 1f, 0f, -(1f - b) * h)
                 }
                 TransitionType.ZOOM -> {
-                    drawClip(canvas, bitmaps, p, prev, prevDur, clipDur, 255, 1f, 0f, 0f)
+                    drawClip(canvas, bitmaps, p, prev, prevDur, prevDur, 255, 1f, 0f, 0f)
                     drawClip(canvas, bitmaps, p, state.clipIndex, state.localT, clipDur, (b * 255).toInt(), 1f + 0.12f * (1f - b), 0f, 0f)
                 }
                 TransitionType.FLASH -> {

@@ -109,7 +109,8 @@ class VideoExporter(private val ctx: Context) {
                 var m = AudioDsp.mix(total, voicePcm, voiceCfg, musicPcm, musicCfg, p.duckMusic)
                 // Trim/pad to EXACTLY the video sample count so the AAC track can
                 // never overshoot the video duration (remux mismatch guard).
-                val exact = frames * AudioDsp.TARGET_RATE / fps
+                // Long math inside the helper - Int overflows past ~24 min @ 30fps.
+                val exact = AudioDsp.exactSampleCount(total)
                 m = AudioDsp.toExactLength(m, exact)
                 mixed = m
             }
@@ -258,9 +259,17 @@ class VideoExporter(private val ctx: Context) {
                 val state = TimelineMath.frameAt(t, durations, p.transitionDurationSec)
                 cache.prepare(state, p)
                 canvas.drawColor(Color.BLACK)
-                renderer.render(canvas, p, state, durations) { idx ->
-                    if (p.clips[idx].type == ClipType.VIDEO) videoFrameFor(videoDecoders, p, idx, state, maxSide)
-                    else cache.get(idx)
+                val rendered = runCatching {
+                    renderer.render(canvas, p, state, durations) { idx ->
+                        if (p.clips.getOrNull(idx)?.type == ClipType.VIDEO) videoFrameFor(videoDecoders, p, idx, state, maxSide)
+                        else cache.get(idx)
+                    }
+                }
+                if (rendered.isFailure) {
+                    // Safety net: log the real cause, draw a black frame, keep going.
+                    // A single bad frame must never abort a 10-minute export.
+                    Log.w(TAG, "frame $i (t=${"%.2f".format(t)}s) render failed: ${rootMsg(rendered.exceptionOrNull()!!)} - substituting black", rendered.exceptionOrNull())
+                    canvas.drawColor(Color.BLACK)
                 }
                 feedVideoInput(encoder, frameBmp, i.toLong() * 1_000_000_000L / fps) {
                     while (true) {
@@ -360,6 +369,9 @@ class VideoExporter(private val ctx: Context) {
         val h = bmp.height
         if (pixels.size < w * h) pixels = IntArray(w * h)
         bmp.getPixels(pixels, 0, w, 0, 0, w, h)
+        if (pixels.size < w * h) {
+            throw ExportException("video encoding", "Frame buffer too small for ${w}x$h - this is a bug, please report")
+        }
         val yPlane = img.planes[0]
         val uPlane = img.planes[1]
         val vPlane = img.planes[2]
