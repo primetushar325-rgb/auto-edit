@@ -39,6 +39,15 @@ object AudioDsp {
         return out
     }
 
+    /**
+     * Exact 48kHz sample count for a project of [totalSec] seconds.
+     * Long arithmetic: Int would overflow for projects longer than ~24 min at 30fps.
+     */
+    fun exactSampleCount(totalSec: Double): Int {
+        val n = (totalSec * TARGET_RATE).toLong()
+        return n.coerceIn(0L, 2_000_000_000L).toInt()
+    }
+
     /** Convert decoded PCM (any rate, 1-2ch) to mono 48 kHz. */
     fun normalize(pcm: ShortArray, channels: Int, fromRate: Int): PcmAudio {
         val mono = toMono(pcm, channels)
