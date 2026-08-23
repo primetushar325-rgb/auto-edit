@@ -233,8 +233,6 @@ class MixedTimelineTest {
         assertEquals(4, trimmed.size)
         assertEquals(3, trimmed[3].toInt())
     }
-}
-
     // ------------------------------------------------ off-by-one / overflow audit
 
     @Test
@@ -276,3 +274,4 @@ class MixedTimelineTest {
             assertEquals("secs=$secs", (secs * 48000).toLong().toInt(), out.size.toLong().toInt())
         }
     }
+}
