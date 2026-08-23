@@ -72,9 +72,9 @@ fun HomeScreen(vm: AppViewModel) {
                 onClick = { showFormulas = true }
             )
             SecondaryButton(
-                text = "EXPORT: 1080p / 30",
+                text = "STORAGE",
                 modifier = Modifier.weight(1f),
-                onClick = { vm.toast("Export settings are on the EXPORT screen of a project") }
+                onClick = { vm.openStorage() }
             )
         }
 

@@ -71,9 +71,10 @@ fun AppRoot() {
         if (!bootstrapped) {
             SplashScreen()
         } else {
-            when (ui.screen) {
-                AppViewModel.Screen.Editor -> if (ui.projectId != null) EditorScreen(vm) else HomeScreen(vm)
-                AppViewModel.Screen.Home -> HomeScreen(vm)
+            when {
+                ui.showStorage -> StorageScreen(vm)
+                ui.screen == AppViewModel.Screen.Editor && ui.projectId != null -> EditorScreen(vm)
+                else -> HomeScreen(vm)
             }
             ToastBar(ui.toast, ui.toastAt, vm::dismissToast)
         }

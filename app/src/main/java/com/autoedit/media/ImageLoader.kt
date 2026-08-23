@@ -12,8 +12,8 @@ import android.net.Uri
  */
 object ImageLoader {
 
-    fun readSize(ctx: Context, uri: Uri): Pair<Int, Int>? = runCatching {
-        ctx.contentResolver.openInputStream(uri)?.use {
+    fun readSize(ctx: Context, uriOrPath: String): Pair<Int, Int>? = runCatching {
+        ProjectStorage.openInput(ctx, uriOrPath)?.use {
             val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeStream(it, null, o)
             if (o.outWidth > 0 && o.outHeight > 0) o.outWidth to o.outHeight else null
@@ -21,14 +21,13 @@ object ImageLoader {
     }.getOrNull()
 
     /** Decode [uri] scaled so the longest side is <= [maxDim]. Null on failure. */
-    fun decodeScaled(ctx: Context, uri: String, maxDim: Int): Bitmap? = runCatching {
-        val u = Uri.parse(uri)
-        val size = readSize(ctx, u) ?: return@runCatching null
+    fun decodeScaled(ctx: Context, uriOrPath: String, maxDim: Int): Bitmap? = runCatching {
+        val size = readSize(ctx, uriOrPath) ?: return@runCatching null
         var sample = 1
         val longest = maxOf(size.first, size.second)
         while (longest / (sample * 2) >= maxDim) sample *= 2
         val opts = BitmapFactory.Options().apply { inSampleSize = sample }
-        ctx.contentResolver.openInputStream(u)?.use {
+        ProjectStorage.openInput(ctx, uriOrPath)?.use {
             BitmapFactory.decodeStream(it, null, opts)
         }
     }.getOrNull()
@@ -45,10 +44,10 @@ object ImageLoader {
         return name.ifBlank { fallback }
     }
 
-    /** Quick bounds-only decode check: can this URI be decoded as an image? */
-    fun isValidImage(ctx: Context, uri: String): Boolean = runCatching {
+    /** Quick bounds-only decode check: can this URI/path be decoded as an image? */
+    fun isValidImage(ctx: Context, uriOrPath: String): Boolean = runCatching {
         val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        ctx.contentResolver.openInputStream(Uri.parse(uri))?.use {
+        ProjectStorage.openInput(ctx, uriOrPath)?.use {
             BitmapFactory.decodeStream(it, null, o)
         }
         o.outWidth > 0 && o.outHeight > 0
@@ -58,11 +57,11 @@ object ImageLoader {
     fun videoDurationMs(ctx: Context, uri: String): Long {
         val r = android.media.MediaMetadataRetriever()
         return try {
-            val pfd = ctx.contentResolver.openFileDescriptor(Uri.parse(uri), "r") ?: return 0L
+            val holder = openFdHolder(ctx, uri) ?: return 0L
             try {
-                r.setDataSource(pfd.fileDescriptor)
+                r.setDataSource(holder.fd)
             } finally {
-                try { pfd.close() } catch (_: Exception) {}
+                closeFdHolder(holder)
             }
             val ms = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
                 ?.toLongOrNull() ?: 0L
@@ -78,11 +77,11 @@ object ImageLoader {
     fun videoThumb(ctx: Context, uri: String, timeMs: Long, maxDim: Int = 320): Bitmap? = runCatching {
         val r = android.media.MediaMetadataRetriever()
         try {
-            val pfd = ctx.contentResolver.openFileDescriptor(Uri.parse(uri), "r") ?: return@runCatching null
+            val holder = openFdHolder(ctx, uri) ?: return@runCatching null
             try {
-                r.setDataSource(pfd.fileDescriptor)
+                r.setDataSource(holder.fd)
             } finally {
-                try { pfd.close() } catch (_: Exception) {}
+                closeFdHolder(holder)
             }
             val frame = r.getFrameAtTime(timeMs * 1000, android.media.MediaMetadataRetriever.OPTION_CLOSEST)
                 ?: return@runCatching null
@@ -102,6 +101,25 @@ object ImageLoader {
             try { r.release() } catch (_: Exception) {}
         }
     }.getOrNull()
+
+    private class FdHolder(val fd: java.io.FileDescriptor, val closable: (() -> Unit)?)
+
+    private fun openFdHolder(ctx: Context, uriOrPath: String): FdHolder? = runCatching {
+        if (ProjectStorage.isPath(uriOrPath)) {
+            val f = java.io.File(uriOrPath)
+            if (!f.exists()) return@runCatching null
+            val ch = java.nio.channels.FileChannel.open(f.toPath(), java.nio.file.StandardOpenOption.READ)
+            FdHolder(ch.fd) { runCatching { ch.close() } }
+        } else {
+            val pfd = ctx.contentResolver.openFileDescriptor(android.net.Uri.parse(uriOrPath), "r")
+                ?: return@runCatching null
+            FdHolder(pfd.fd) { runCatching { pfd.close() } }
+        }
+    }.getOrNull()
+
+    private fun closeFdHolder(h: FdHolder?) {
+        h?.closable?.invoke()
+    }
 
     /** Fast duration estimate (ms) from media metadata, 0 on failure. */
     fun estimateDurationMs(ctx: Context, uri: String): Long {

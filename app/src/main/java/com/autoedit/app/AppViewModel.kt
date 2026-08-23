@@ -23,6 +23,7 @@ import com.autoedit.engine.Quality
 import com.autoedit.engine.TransitionType
 import com.autoedit.media.AudioDecoder
 import com.autoedit.media.ImageLoader
+import com.autoedit.media.ProjectStorage
 import com.autoedit.media.VideoExporter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -85,6 +86,9 @@ class AppViewModel(app: Application) : ViewModel() {
         val showExport: Boolean = false,
         val showClipMenu: Int? = null,
         val showRename: Boolean = false,
+        val showStorage: Boolean = false,
+        val storageTotal: Long = 0L,
+        val storageRows: List<StorageRow> = emptyList(),
         val showZoomEditor: Int? = null,
         val showJunction: Int? = null,
         val pendingVideo: Pair<String, Double>? = null,
@@ -93,6 +97,8 @@ class AppViewModel(app: Application) : ViewModel() {
         val exportStage: String = "",
         val needStoragePermission: Boolean = false
     )
+
+    data class StorageRow(val id: String, val name: String, val size: Long)
 
     private val app: Application = app
     private val repo = ProjectRepository(File(app.filesDir, "projects"))
@@ -108,6 +114,10 @@ class AppViewModel(app: Application) : ViewModel() {
 
     init {
         refreshProjects()
+        // startup cleanup: orphaned temp files from crashed exports (>24h old)
+        mainScope.launch {
+            withContext(Dispatchers.IO) { ProjectStorage.cleanOrphans(app) }
+        }
     }
 
     // ------------------------------------------------------------------ home
@@ -141,6 +151,7 @@ class AppViewModel(app: Application) : ViewModel() {
             formulaId = f.id,
             motionSeed = (System.nanoTime() and 0x7FFFFFFFFFFFFFFFL)
         )
+        ProjectStorage.ensureProject(app, p.id)
         repo.save(p)
         openProject(p.id)
         toast("${f.name} ${f.tagline} ready - tap APPLY FORMULA when images are added")
@@ -163,8 +174,12 @@ class AppViewModel(app: Application) : ViewModel() {
     fun deleteProject(id: String) {
         stopPreview()
         repo.delete(id)
-        refreshProjects()
-        toast("Project deleted")
+        mainScope.launch {
+            withContext(Dispatchers.IO) { ProjectStorage.deleteProjectFolder(app, id) }
+            refreshProjects()
+            if (_ui.value.showStorage) loadStorageInfo()
+            toast("Project deleted")
+        }
     }
 
     fun goHome() {
@@ -231,48 +246,64 @@ class AppViewModel(app: Application) : ViewModel() {
 
     fun addImages(uris: List<Uri>) {
         val p = current() ?: return
-        val newClips = p.clips.toMutableList()
-        val addedUris = mutableListOf<String>()
-        var added = 0
-        var skipped = 0
-        for (u in uris) {
-            val s = u.toString()
-            if (newClips.any { it.uri == s }) continue
-            val mime = runCatching { app.contentResolver.getType(u) }.getOrNull()
-            if (mime != null && !mime.startsWith("image/")) {
-                skipped++
-                continue
+        mainScope.launch {
+            toast("Importing…")
+            val copied = withContext(Dispatchers.IO) {
+                val dir = ProjectStorage.sourceDir(app, p.id)
+                val base = p.clips.size
+                val out = ArrayList<Pair<String, String>>() // srcUri to localPath
+                var skippedMime = 0
+                for (u in uris) {
+                    val src = u.toString()
+                    if (p.clips.any { it.uri == src } || out.any { it.first == src }) continue
+                    val mime = runCatching { app.contentResolver.getType(u) }.getOrNull()
+                    if (mime != null && !mime.startsWith("image/")) {
+                        skippedMime++
+                        continue
+                    }
+                    val ext = when {
+                        mime == "image/png" -> ".png"
+                        mime == "image/webp" -> ".webp"
+                        else -> ".img"
+                    }
+                    val dest = File(dir, "${System.currentTimeMillis()}_${base + out.size}$ext")
+                    if (ProjectStorage.copyUriTo(app, src, dest)) out += src to dest.absolutePath
+                }
+                out to skippedMime
+            }
+            val (pairs, skipped) = copied
+            if (pairs.isEmpty()) {
+                if (skipped > 0) toast("None of the selected files are images")
+                else toast("These images are already in the project")
+                return@launch
             }
             // Newly added clips are STATIC by default - no auto formula/motion.
             // Motion is applied only when the user taps "Apply Formula" or sets zoom.
-            newClips += ClipRef(uri = s, type = ClipType.IMAGE, motion = null)
-            addedUris += s
-            added++
-        }
-        if (added == 0 && skipped > 0) {
-            toast("None of the selected files are images")
-            return
-        }
-        if (added == 0) {
-            toast("These images are already in the project")
-            return
-        }
-        mutate { pr -> pr.copy(clips = newClips) }
-        val total = (p.clips.size + added) * p.imageClipDuration()
-        val totalStr = fmtTime(total)
-        toast(
-            if (added >= 100) "$added images imported • Total duration: $totalStr"
-            else "+$added image${if (added > 1) "s" else ""} added ($totalStr total) — apply a Formula or set zoom"
-        )
-        // Background validation: corrupted/unsupported images must never crash
-        // the import - report them with a friendly message instead.
-        mainScope.launch {
-            val bad = withContext(Dispatchers.IO) {
-                addedUris.count { uri -> !com.autoedit.media.ImageLoader.isValidImage(app, uri) }
+            val addedPaths = pairs.map { it.second }
+            mutate { pr ->
+                val clips = pr.clips.toMutableList()
+                pairs.forEach { (_, path) -> clips += ClipRef(uri = path, type = ClipType.IMAGE, motion = null) }
+                pr.copy(clips = clips)
             }
-            if (bad > 0) toast("$bad image(s) could not be imported")
+            val added = pairs.size
+            val total = p.totalDuration() + added * p.imageClipDuration()
+            val totalStr = fmtTime(total)
+            toast(
+                if (added >= 100) "$added images imported • Total duration: $totalStr"
+                else "+$added image${if (added > 1) "s" else ""} added ($totalStr total) — apply a Formula or set zoom"
+            )
+            // Background validation: corrupted/unsupported images must never crash
+            // the import - report them with a friendly message instead.
+            launch {
+                val bad = withContext(Dispatchers.IO) {
+                    addedPaths.count { path -> !com.autoedit.media.ImageLoader.isValidImage(app, path) }
+                }
+                if (bad > 0) toast("$bad image(s) could not be imported")
+            }
         }
     }
+
+
 
     fun removeClip(i: Int) {
         _ui.update { it.copy(showClipMenu = null) }
@@ -450,57 +481,67 @@ class AppViewModel(app: Application) : ViewModel() {
     // ---------------------------------------------------------------- audio
 
     fun pickVoice(uri: Uri) {
+        val p = current() ?: return
         mainScope.launch {
             toast("Loading voice…")
-            val s = uri.toString()
+            val src = uri.toString()
             val dur = withContext(Dispatchers.Default) {
-                val est = ImageLoader.estimateDurationMs(ctx = app, uri = s) / 1000.0
+                val est = ImageLoader.estimateDurationMs(ctx = app, uri = src) / 1000.0
                 if (est > 0.5) est
                 else {
-                    runCatching { AudioDecoder.decode(app, s, 1200.0) }.getOrNull()?.durationSec ?: 0.0
+                    runCatching { AudioDecoder.decode(app, src, 1200.0) }.getOrNull()?.durationSec ?: 0.0
                 }
             }
             if (dur <= 0.2) {
                 toast("Unable to load this audio file")
                 return@launch
             }
-            val name = withContext(Dispatchers.IO) { ImageLoader.displayName(app, s, "voice") }
-            mutate { pr -> pr.copy(voice = AudioConfig(s, name, dur, loop = false)) }
+            val name = withContext(Dispatchers.IO) { ImageLoader.displayName(app, src, "voice") }
+            val localPath = withContext(Dispatchers.IO) {
+                val ext = name.substringAfterLast('.', "audio").lowercase().takeIf { it.length in 1..5 } ?: "audio"
+                val dest = File(ProjectStorage.audioDir(app, p.id), "voice_${System.currentTimeMillis()}.$ext")
+                if (ProjectStorage.copyUriTo(app, src, dest)) dest.absolutePath else null
+            }
+            if (localPath == null) {
+                toast("Voice could not be copied into the project")
+                return@launch
+            }
+            mutate { pr -> pr.copy(voice = AudioConfig(localPath, name, dur, loop = false)) }
             audio.loadVoice(_ui.value.voice)
             toast("Voice added (${fmtTime(dur)})")
         }
     }
 
     fun pickMusic(uri: Uri) {
+        val p = current() ?: return
         mainScope.launch {
             toast("Loading music…")
-            val s = uri.toString()
+            val src = uri.toString()
             val dur = withContext(Dispatchers.Default) {
-                val est = ImageLoader.estimateDurationMs(ctx = app, uri = s) / 1000.0
+                val est = ImageLoader.estimateDurationMs(ctx = app, uri = src) / 1000.0
                 if (est > 0.5) est
                 else {
-                    runCatching { AudioDecoder.decode(app, s, 1200.0) }.getOrNull()?.durationSec ?: 0.0
+                    runCatching { AudioDecoder.decode(app, src, 1200.0) }.getOrNull()?.durationSec ?: 0.0
                 }
             }
             if (dur <= 0.2) {
                 toast("Unable to load this audio file")
                 return@launch
             }
-            val name = withContext(Dispatchers.IO) { ImageLoader.displayName(app, s, "music") }
-            mutate { pr -> pr.copy(music = AudioConfig(s, name, dur, volume = 0.5f, loop = true)) }
+            val name = withContext(Dispatchers.IO) { ImageLoader.displayName(app, src, "music") }
+            val localPath = withContext(Dispatchers.IO) {
+                val ext = name.substringAfterLast('.', "audio").lowercase().takeIf { it.length in 1..5 } ?: "audio"
+                val dest = File(ProjectStorage.audioDir(app, p.id), "music_${System.currentTimeMillis()}.$ext")
+                if (ProjectStorage.copyUriTo(app, src, dest)) dest.absolutePath else null
+            }
+            if (localPath == null) {
+                toast("Music could not be copied into the project")
+                return@launch
+            }
+            mutate { pr -> pr.copy(music = AudioConfig(localPath, name, dur, volume = 0.5f, loop = true)) }
             audio.loadMusic(_ui.value.music)
             toast("Music added (${fmtTime(dur)})")
         }
-    }
-
-    fun updateVoice(block: (AudioConfig) -> AudioConfig) {
-        mutate { pr -> pr.copy(voice = pr.voice?.let(block)) }
-        audio.loadVoice(_ui.value.voice)
-    }
-
-    fun updateMusic(block: (AudioConfig) -> AudioConfig) {
-        mutate { pr -> pr.copy(music = pr.music?.let(block)) }
-        audio.loadMusic(_ui.value.music)
     }
 
     fun removeVoice() {
@@ -629,20 +670,31 @@ class AppViewModel(app: Application) : ViewModel() {
         cancelFlag.set(false)
         exportJob = mainScope.launch {
             val snapshot = p
+            val tempDir = ProjectStorage.tempDir(app, p.id)
+            val exportDir = ProjectStorage.exportDir(app, p.id)
             val result = withContext(Dispatchers.Default) {
-                exporter.export(snapshot, { cancelFlag.get() }) { prog, stage ->
+                exporter.export(
+                    snapshot, tempDir, exportDir,
+                    { cancelFlag.get() }
+                ) { prog, stage ->
                     _ui.update { it.copy(exportProgress = prog, exportStage = stage) }
                 }
             }
             _ui.update { it.copy(exporting = false) }
-            result.onSuccess {
-                toast("Video saved to Movies/Auto Edit")
+            result.onSuccess { res ->
+                val where = if (res.mediaStoreUri != null) {
+                    "Video saved to Movies/Auto Edit (copy also in the project folder)"
+                } else {
+                    "Video saved in the project folder (Movies copy failed: ${res.file.name})"
+                }
+                toast(where)
             }.onFailure { e ->
+                // always a specific, actionable message - never a generic one
                 val msg = when {
                     e is VideoExporter.ExportCancelled -> "Export cancelled"
                     e.message != null && e.message!!.contains("storage", ignoreCase = true) ->
                         "Not enough storage to export this video."
-                    else -> (e.message ?: "Export failed. Please try again.").take(300)
+                    else -> (e.message ?: "Export failed: ${e.javaClass.simpleName}").take(300)
                 }
                 toast(msg)
             }

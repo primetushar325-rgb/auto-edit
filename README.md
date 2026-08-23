@@ -106,8 +106,38 @@ save the exported video. No analytics, no tracking, no network calls.
 - Persistent read grants are taken where the picker supports them, so
   projects stay valid after restart
 
-### Export reliability
+### Export reliability (crash-proof)
 
-- Audio is trimmed/padded to the exact video sample count before muxing
-- Pre-stop PTS validation on both tracks; audio never overshoots the video
-- Real error messages surface the stage + root cause (render / encode / merge)
+- **YUV fix**: the field crash `index=1036800 out of bounds (limit=1036799)`
+  was a chroma subsampling bug - U/V planes hold h/2 rows, the old writer
+  used full-luma row offsets and overflowed the 1080p U plane (1920x540 =
+  1,036,800 bytes) at exactly that index, on every frame of every project.
+  `YuvConverter` now handles planar (pixelStride=1) and semi-planar
+  (pixelStride=2) layouts, asserts plane capacities against the actual
+  resolution (clear error, never a silent crash) and clamps+logs any
+  out-of-bounds index as a safety net.
+- **Single-session mux**: one MediaMuxer writes both tracks (audio added
+  from the real encoded format, video streamed live, interleaved by PTS).
+  The separate video-remux step is gone.
+- Audio is trimmed/padded to the exact video sample count (Long math - no
+  Int overflow on long projects)
+- Per-frame render failures log the cause and substitute a black frame
+  instead of killing a long export
+- Every caught export error is logged with a full stack trace and shown to
+  the user with a specific, stage-specific message
+
+### Per-project storage
+
+```
+filesDir/projects/<project_id>/
+  source_images/   (images + inserted video clips, copied in)
+  audio/           (voice + music, copied in)
+  export/          (final .mp4 outputs)
+  temp/            (render temp - always cleaned after export, success or fail)
+  project.json
+```
+
+- Picker URIs are copied into the project, so expiring URI grants never
+  break a saved project
+- Home -> STORAGE shows total usage + per-project size + full delete
+- Startup auto-cleans orphaned temp files older than 24h

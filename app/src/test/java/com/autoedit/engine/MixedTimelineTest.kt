@@ -276,4 +276,48 @@ class MixedTimelineTest {
             assertEquals("secs=$secs", (secs * 48000).toLong().toInt(), out.size.toLong().toInt())
         }
     }
+
+    // --------------------------------------------------- export test matrix
+
+    @Test
+    fun `test matrix - 2 point 5s clips at 10 25 50 images`() {
+        for (n in listOf(10, 25, 50)) {
+            val p = ProjectModel(
+                "p", "p", 0, 0,
+                clips = List(n) { ClipRef(uri = "u$it") },
+                clipDurationSec = 2.5
+            )
+            assertEquals("n=$n", n * 2.5, p.totalDuration(), 1e-9)
+            // exact audio sample count for the whole matrix case
+            val samples = AudioDsp.exactSampleCount(p.totalDuration())
+            assertEquals("n=$n", (n * 2.5 * 48000).toLong().toInt(), samples)
+        }
+    }
+
+    @Test
+    fun `test matrix - frameAt across non integer durations`() {
+        // 3 clips x 2.5s = 7.5s
+        val p = ProjectModel(
+            "p", "p", 0, 0,
+            clips = List(3) { ClipRef(uri = "u$it") },
+            clipDurationSec = 2.5
+        )
+        val d = p.clipDurations()
+        assertEquals(2.5, d[0], 1e-9)
+        assertEquals(0, TimelineMath.frameAt(2.49, d, 0.45).clipIndex)
+        assertEquals(1, TimelineMath.frameAt(2.5, d, 0.45).clipIndex)
+        assertEquals(2, TimelineMath.frameAt(7.49, d, 0.45).clipIndex)
+        assertEquals(2, TimelineMath.frameAt(100.0, d, 0.45).clipIndex) // clamped
+    }
+
+    @Test
+    fun `test matrix - 720p and 1080p buffer sizes differ and are exact`() {
+        // the crash index was 1,036,800 = 1920x540 (U plane of 1080p)
+        assertEquals(1_036_800, YuvConverter.minChromaSize(1920, 1080, 1920, 1))
+        assertEquals(460_800, YuvConverter.minChromaSize(1280, 720, 1280, 1))
+        val cfg720 = ExportConfig(Quality.Q720, 30, AspectRatio.LANDSCAPE_16_9)
+        val cfg1080 = ExportConfig(Quality.Q1080, 30, AspectRatio.LANDSCAPE_16_9)
+        assertEquals(921_600, cfg720.widthFor() * cfg720.heightFor())
+        assertEquals(2_073_600, cfg1080.widthFor() * cfg1080.heightFor())
+    }
 }

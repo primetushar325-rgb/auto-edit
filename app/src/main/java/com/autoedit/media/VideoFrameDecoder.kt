@@ -7,23 +7,21 @@ import android.media.Image
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
-import android.net.Uri
+import android.util.Log
+import com.autoedit.engine.YuvConverter
 
-/**
- * Pull-style video frame decoder: decodes a trimmed segment
- * [inMs]..[outMs] of a video URI into Bitmaps sized for the export frame.
- *
- * - Uses MediaCodec + ImageReader (YUV_420_888) + a manual BT.601 YUV->RGB
- *   conversion, so it works on all minSdk-26 devices.
- * - [nextFrame] returns a frame whose presentation time is >= the requested
- *   time (holds the last frame after the segment ends - caller stops first).
- * - The returned Bitmap is REUSED: it is only valid until the next call.
- */
 private const val TAG = "AutoEdit"
 
+/**
+ * Pull-style video frame decoder for inserted video clips:
+ * MediaCodec + ImageReader (YUV_420_888) + stride-correct YuvConverter.
+ *
+ * The returned Bitmap is REUSED by this decoder - it is only valid until the
+ * next call on the same instance.
+ */
 class VideoFrameDecoder(
     private val ctx: Context,
-    private val uri: String,
+    private val uriOrPath: String,
     private val inMs: Long,
     private val outMs: Long,
     private val maxSide: Int
@@ -39,18 +37,31 @@ class VideoFrameDecoder(
     private var inputDone = false
     private var outputEos = false
     private val info = MediaCodec.BufferInfo()
+    private var clampWarned = false
+    /** Keeps the fd (file channel / pfd) alive for the whole decode. */
+    private var fdHolder: Any? = null
 
-    /** Decoded frames arrive at the source aspect ratio, capped at [maxSide]. */
     fun size(): Pair<Int, Int> = width to height
 
     fun init() {
         val ext = MediaExtractor()
-        val pfd = ctx.contentResolver.openFileDescriptor(Uri.parse(uri), "r")
-            ?: throw Exception("Unable to open this video file.")
+        val fd: java.io.FileDescriptor = if (ProjectStorage.isPath(uriOrPath)) {
+            val f = java.io.File(uriOrPath)
+            if (!f.exists()) throw Exception("Video file is missing: ${f.absolutePath}")
+            val ch = FileChannel.open(f.toPath(), java.nio.file.StandardOpenOption.READ)
+            fdHolder = ch
+            ch.fd
+        } else {
+            val pfd = ctx.contentResolver.openFileDescriptor(android.net.Uri.parse(uriOrPath), "r")
+                ?: throw Exception("Unable to open this video file.")
+            fdHolder = pfd
+            pfd.fd
+        }
         try {
-            ext.setDataSource(pfd.fileDescriptor)
-        } finally {
-            try { pfd.close() } catch (_: Exception) {}
+            ext.setDataSource(fd)
+        } catch (e: Exception) {
+            releaseFd()
+            throw Exception("Unable to read this video file: ${e.message ?: "unknown error"}")
         }
         var track = -1
         var mime = ""
@@ -64,7 +75,7 @@ class VideoFrameDecoder(
             }
         }
         if (track < 0) {
-            ext.release()
+            runCatching { ext.release() }
             throw Exception("No video track found in this file.")
         }
         ext.selectTrack(track)
@@ -72,7 +83,7 @@ class VideoFrameDecoder(
         val srcW = fmt.getInteger(MediaFormat.KEY_WIDTH)
         val srcH = fmt.getInteger(MediaFormat.KEY_HEIGHT)
         if (srcW <= 0 || srcH <= 0) {
-            ext.release()
+            runCatching { ext.release() }
             throw Exception("Unable to read video dimensions.")
         }
         val scale = (maxSide.toDouble() / maxOf(srcW, srcH)).coerceAtMost(2.0)
@@ -89,17 +100,23 @@ class VideoFrameDecoder(
         decoder = dec
         frame = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         pixels = IntArray(width * height)
+        runCatching { ext.seekTo(inMs * 1000, MediaExtractor.SEEK_TO_CLOSEST_SYNC) }
+    }
 
-        try {
-            ext.seekTo(inMs * 1000, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
-        } catch (_: Exception) {
+    private fun releaseFd() {
+        val h = fdHolder
+        fdHolder = null
+        if (h != null) {
+            runCatching {
+                when (h) {
+                    is FileChannel -> h.close()
+                    is android.content.res.AssetFileDescriptor -> h.close()
+                }
+            }.onFailure { Log.w(TAG, "fd close failed", it) }
         }
     }
 
-    /**
-     * Decode until we have a frame at or after [neededUs] (absolute time in the
-     * source file), then return the reused frame bitmap.
-     */
+    /** Decode until we have a frame at or after [neededUs], return the reused frame. */
     fun nextFrame(neededUs: Long): Bitmap? {
         val dec = decoder ?: return null
         val imgReader = reader ?: return null
@@ -107,7 +124,6 @@ class VideoFrameDecoder(
         var guard = 0
         while (currentPtsUs < neededUs && !outputEos && guard < 2000) {
             guard++
-            // feed input up to the segment end
             if (!inputDone) {
                 val inIdx = dec.dequeueInputBuffer(10_000)
                 if (inIdx >= 0) {
@@ -133,18 +149,18 @@ class VideoFrameDecoder(
                     if (info.size > 0) {
                         val img = awaitImage(imgReader)
                         if (img != null) {
-                            yuvToArgb(img, pixels)
-                            bmp.setPixels(pixels, 0, width, 0, 0, width, height)
-                            currentPtsUs = info.presentationTimeUs
+                            try {
+                                yuvToArgb(img)
+                                currentPtsUs = info.presentationTimeUs
+                            } finally {
+                                runCatching { img.close() }
+                            }
                         }
-                        try { img?.close() } catch (_: Exception) {}
                     }
                     dec.releaseOutputBuffer(outIdx, false)
                     if (flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) outputEos = true
                 }
-                outIdx == MediaCodec.INFO_TRY_AGAIN_LATER -> {
-                    // keep looping
-                }
+                outIdx == MediaCodec.INFO_TRY_AGAIN_LATER -> Unit
             }
         }
         return if (currentPtsUs >= 0) bmp else null
@@ -156,56 +172,57 @@ class VideoFrameDecoder(
         while (img == null && guard < 200) {
             guard++
             img = reader.acquireLatestImage()
-            if (img == null) Thread.sleep(5)
+            if (img == null) runCatching { Thread.sleep(5) }
         }
         return img
     }
 
-    /** BT.601 YUV_420_888 -> ARGB into [out] (width*height ints). */
-    private fun yuvToArgb(img: Image, out: IntArray) {
-        val yPlane = img.planes[0]
-        val uPlane = img.planes[1]
-        val vPlane = img.planes[2]
-        val yRow = yPlane.rowStride
-        val uRow = uPlane.rowStride
-        val vRow = vPlane.rowStride
-        val uPix = uPlane.pixelStride
-        val vPix = vPlane.pixelStride
-        val yB = yPlane.buffer
-        val uB = uPlane.buffer
-        val vB = vPlane.buffer
-        var p = 0
-        for (y in 0 until height) {
-            val yBase = y * yRow
-            val uBase = y * uRow
-            val vBase = y * vRow
-            for (x in 0 until width) {
-                val yv = yB.get(yBase + x).toInt() and 0xFF
-                val uv = (x shr 1)
-                val u = (uB.get(uBase + uv * uPix).toInt() and 0xFF) - 128
-                val v = (vB.get(vBase + uv * vPix).toInt() and 0xFF) - 128
-                val r = (yv + 1.402 * v).toInt().coerceIn(0, 255)
-                val g = (yv - 0.344 * u - 0.714 * v).toInt().coerceIn(0, 255)
-                val b = (yv + 1.772 * u).toInt().coerceIn(0, 255)
-                if (p >= out.size) {
-                    // safety net: plane/stride mismatch - stop filling, log once
-                    android.util.Log.w(TAG, "yuvToArgb: pixel $p out of bounds (size=${out.size}) - clamping")
-                    return
-                }
-                out[p++] = 0xFF000000.toInt() or (r shl 16) or (g shl 8) or b
-            }
+    /** Stride-correct, bounds-safe YUV420 -> ARGB (chroma is h/2 rows, not h). */
+    private fun yuvToArgb(img: Image) {
+        val w = width
+        val h = height
+        val out = pixels
+        val yp = img.planes[0]
+        val up = img.planes[1]
+        val vp = img.planes[2]
+        val yRow = yp.rowStride
+        val uRow = up.rowStride
+        val vRow = vp.rowStride
+        val uPix = up.pixelStride
+        val vPix = vp.pixelStride
+        val yNeed = YuvConverter.minLumaSize(w, h, yRow)
+        val uNeed = YuvConverter.minChromaSize(w, h, uRow, uPix)
+        val vNeed = YuvConverter.minChromaSize(w, h, vRow, vPix)
+        val yCap = yp.buffer.position() + yp.buffer.limit()
+        val uCap = up.buffer.position() + up.buffer.limit()
+        val vCap = vp.buffer.position() + vp.buffer.limit()
+        if (yCap < yNeed || uCap < uNeed || vCap < vNeed) {
+            Log.e(TAG, "video frame planes too small for ${w}x$h: y=$yCap/$yNeed u=$uCap/$uNeed v=$vCap/$vNeed")
+            return
         }
+        val clamped = YuvConverter.yuv420ToArgb(
+            yp.buffer, yRow,
+            up.buffer, uRow, uPix,
+            vp.buffer, vRow, vPix,
+            w, h, out
+        )
+        if (clamped > 0 && !clampWarned) {
+            Log.w(TAG, "video YUV read: $clamped reads clamped to plane bounds - frame may be corrupted")
+            clampWarned = true
+        }
+        frame?.setPixels(out, 0, w, 0, 0, w, h)
     }
 
     fun release() {
-        try { decoder?.stop() } catch (_: Exception) {}
-        try { decoder?.release() } catch (_: Exception) {}
-        try { extractor?.release() } catch (_: Exception) {}
-        try { reader?.close() } catch (_: Exception) {}
+        runCatching { decoder?.stop() }.onFailure { Log.w(TAG, "decoder stop failed", it) }
+        runCatching { decoder?.release() }.onFailure { Log.w(TAG, "decoder release failed", it) }
+        runCatching { extractor?.release() }.onFailure { Log.w(TAG, "extractor release failed", it) }
+        runCatching { reader?.close() }.onFailure { Log.w(TAG, "image reader close failed", it) }
         decoder = null
         extractor = null
         reader = null
-        frame?.recycle()
+        runCatching { frame?.recycle() }.onFailure { Log.w(TAG, "frame recycle failed", it) }
         frame = null
+        releaseFd()
     }
 }
