@@ -73,10 +73,10 @@ class YuvConverterTest {
     @Test
     fun `structurally invalid planes return -1 without throwing`() {
         val rgb = IntArray(64)
-        val clamped = YuvConverter.rgbToYuv420(rgb, 64, 64, ByteArray(10), 64, ByteArray(10), 64, 1, ByteArray(10), 64, 1)
+        val clamped = YuvConverter.rgbToYuv420(rgb, 64, 64, java.nio.ByteBuffer.allocate(10), 64, java.nio.ByteBuffer.allocate(10), 64, 1, java.nio.ByteBuffer.allocate(10), 64, 1)
         assertEquals(-1, clamped)
         val out = IntArray(10)
-        val read = YuvConverter.yuv420ToArgb(ByteArray(10), 64, ByteArray(10), 64, 1, ByteArray(10), 64, 1, 64, 64, out)
+        val read = YuvConverter.yuv420ToArgb(java.nio.ByteBuffer.allocate(10), 64, java.nio.ByteBuffer.allocate(10), 64, 1, java.nio.ByteBuffer.allocate(10), 64, 1, 64, 64, out)
         assertEquals(-1, read)
     }
 
