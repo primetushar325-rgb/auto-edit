@@ -21,6 +21,7 @@ import com.autoedit.engine.FormulaCatalog
 import com.autoedit.engine.ProjectModel
 import com.autoedit.engine.TimelineMath
 import com.autoedit.engine.YuvConverter
+import com.autoedit.render.ExportRenderer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -213,7 +214,7 @@ class VideoExporter(private val ctx: Context) {
 
     // ------------------------------------------------------------- video
 
-    private fun encodeVideo(
+    private suspend fun encodeVideo(
         p: ProjectModel,
         frames: Int,
         w: Int,
@@ -224,7 +225,7 @@ class VideoExporter(private val ctx: Context) {
         audioExtractor: MediaExtractor?,
         easing: EasingType,
         isCancelled: () -> Boolean,
-        onFrame: (Float) -> Unit
+        onFrame: suspend (Float) -> Unit
     ) {
         // Fresh buffers for THIS export only - never reused across projects.
         val frameBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
@@ -237,7 +238,7 @@ class VideoExporter(private val ctx: Context) {
         val muxer = MediaMuxer(finalFile.absolutePath, OUTPUT_FORMAT_MP4)
         val info = MediaCodec.BufferInfo()
         val aInfo = MediaCodec.BufferInfo()
-        val audioBuf = ByteArray(256 * 1024)
+        val audioBuf = java.nio.ByteBuffer.allocate(256 * 1024)
         var videoTrack = -1
         var audioTrack = -1
         var muxerStarted = false
@@ -279,6 +280,7 @@ class VideoExporter(private val ctx: Context) {
                 while (true) {
                     val t = audioExtractor.sampleTime
                     if (t >= frameEndUs) break
+                    audioBuf.clear()
                     val size = audioExtractor.readSampleData(audioBuf, 0)
                     if (size < 0) { audioDone = true; break }
                     aInfo.size = size

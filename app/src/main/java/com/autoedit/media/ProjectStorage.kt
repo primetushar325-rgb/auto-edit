@@ -5,9 +5,6 @@ import android.net.Uri
 import android.util.Log
 import java.io.File
 import java.io.InputStream
-import java.nio.channels.FileChannel
-import java.nio.channels.FileDescriptor
-import java.nio.file.StandardOpenOption
 
 /**
  * Per-project scoped storage layout (app private storage, no shared storage):
@@ -63,19 +60,9 @@ object ProjectStorage {
         }
     }.getOrNull()
 
-    fun openFd(ctx: Context, uriOrPath: String): FileDescriptor? = runCatching {
-        if (isPath(uriOrPath)) {
-            val f = File(uriOrPath)
-            if (!f.exists()) return@runCatching null
-            FileChannel.open(f.toPath(), StandardOpenOption.READ).fd()
-        } else {
-            ctx.contentResolver.openFileDescriptor(Uri.parse(uriOrPath), "r")?.fd
-        }
-    }.getOrNull()
-
     /** Copy a content URI (or path) into [dest]; returns true on success. */
     fun copyUriTo(ctx: Context, src: String, dest: File): Boolean = runCatching {
-        val ins: InputStream? = openInput(ctx, src) ?: return false
+        val ins = openInput(ctx, src) ?: return false
         ins.use { input ->
             dest.parentFile?.mkdirs()
             dest.outputStream().use { input.copyTo(it, 1024 * 1024) }

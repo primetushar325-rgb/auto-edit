@@ -56,33 +56,26 @@ object ImageLoader {
     /** Duration of a video file in ms (0 on failure). */
     fun videoDurationMs(ctx: Context, uri: String): Long {
         val r = android.media.MediaMetadataRetriever()
+        var pfd: android.content.res.AssetFileDescriptor? = null
         return try {
-            val holder = openFdHolder(ctx, uri) ?: return 0L
-            try {
-                r.setDataSource(holder.fd)
-            } finally {
-                closeFdHolder(holder)
-            }
+            pfd = setupRetriever(ctx, uri, r)
             val ms = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
                 ?.toLongOrNull() ?: 0L
             if (ms in 200..(60 * 60 * 1000)) ms else 0L
         } catch (e: Exception) {
             0L
         } finally {
-            try { r.release() } catch (_: Exception) {}
+            runCatching { r.release() }
+            runCatching { pfd?.close() }
         }
     }
 
     /** A thumbnail frame from a video at [timeMs] (for timeline/preview cards). */
     fun videoThumb(ctx: Context, uri: String, timeMs: Long, maxDim: Int = 320): Bitmap? = runCatching {
         val r = android.media.MediaMetadataRetriever()
+        var pfd: android.content.res.AssetFileDescriptor? = null
         try {
-            val holder = openFdHolder(ctx, uri) ?: return@runCatching null
-            try {
-                r.setDataSource(holder.fd)
-            } finally {
-                closeFdHolder(holder)
-            }
+            pfd = setupRetriever(ctx, uri, r)
             val frame = r.getFrameAtTime(timeMs * 1000, android.media.MediaMetadataRetriever.OPTION_CLOSEST)
                 ?: return@runCatching null
             // scale down
@@ -98,27 +91,22 @@ object ImageLoader {
                 out
             }
         } finally {
-            try { r.release() } catch (_: Exception) {}
+            runCatching { r.release() }
+            runCatching { pfd?.close() }
         }
     }.getOrNull()
 
-    private class FdHolder(val fd: java.io.FileDescriptor, val closable: (() -> Unit)?)
-
-    private fun openFdHolder(ctx: Context, uriOrPath: String): FdHolder? = runCatching {
-        if (ProjectStorage.isPath(uriOrPath)) {
-            val f = java.io.File(uriOrPath)
-            if (!f.exists()) return@runCatching null
-            val ch = java.nio.channels.FileChannel.open(f.toPath(), java.nio.file.StandardOpenOption.READ)
-            FdHolder(ch.fd) { runCatching { ch.close() } }
+    private fun setupRetriever(ctx: Context, uriOrPath: String, r: android.media.MediaMetadataRetriever): android.content.res.AssetFileDescriptor? {
+        return if (ProjectStorage.isPath(uriOrPath)) {
+            if (!java.io.File(uriOrPath).exists()) throw Exception("File missing: $uriOrPath")
+            r.setDataSource(uriOrPath)
+            null
         } else {
             val pfd = ctx.contentResolver.openFileDescriptor(android.net.Uri.parse(uriOrPath), "r")
-                ?: return@runCatching null
-            FdHolder(pfd.fd) { runCatching { pfd.close() } }
+                ?: throw Exception("Unable to open: $uriOrPath")
+            r.setDataSource(pfd.fd)
+            pfd // caller keeps it open until done with the retriever
         }
-    }.getOrNull()
-
-    private fun closeFdHolder(h: FdHolder?) {
-        h?.closable?.invoke()
     }
 
     /** Fast duration estimate (ms) from media metadata, 0 on failure. */

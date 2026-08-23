@@ -45,20 +45,16 @@ class VideoFrameDecoder(
 
     fun init() {
         val ext = MediaExtractor()
-        val fd: java.io.FileDescriptor = if (ProjectStorage.isPath(uriOrPath)) {
-            val f = java.io.File(uriOrPath)
-            if (!f.exists()) throw Exception("Video file is missing: ${f.absolutePath}")
-            val ch = FileChannel.open(f.toPath(), java.nio.file.StandardOpenOption.READ)
-            fdHolder = ch
-            ch.fd
-        } else {
-            val pfd = ctx.contentResolver.openFileDescriptor(android.net.Uri.parse(uriOrPath), "r")
-                ?: throw Exception("Unable to open this video file.")
-            fdHolder = pfd
-            pfd.fd
-        }
         try {
-            ext.setDataSource(fd)
+            if (ProjectStorage.isPath(uriOrPath)) {
+                if (!java.io.File(uriOrPath).exists()) throw Exception("Video file is missing: $uriOrPath")
+                ext.setDataSource(uriOrPath)
+            } else {
+                val pfd = ctx.contentResolver.openFileDescriptor(android.net.Uri.parse(uriOrPath), "r")
+                    ?: throw Exception("Unable to open this video file.")
+                fdHolder = pfd
+                ext.setDataSource(pfd.fd)
+            }
         } catch (e: Exception) {
             releaseFd()
             throw Exception("Unable to read this video file: ${e.message ?: "unknown error"}")
@@ -108,10 +104,7 @@ class VideoFrameDecoder(
         fdHolder = null
         if (h != null) {
             runCatching {
-                when (h) {
-                    is FileChannel -> h.close()
-                    is android.content.res.AssetFileDescriptor -> h.close()
-                }
+                (h as? android.content.res.AssetFileDescriptor)?.close()
             }.onFailure { Log.w(TAG, "fd close failed", it) }
         }
     }
