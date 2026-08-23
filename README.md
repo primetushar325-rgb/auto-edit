@@ -1,5 +1,7 @@
 # Auto Edit
 
+<div align="center"><img src="logo.png" width="180" alt="Auto Edit logo"/></div>
+
 **IMAGE → AUTOMATIC 3-SECOND CLIPS → FORMULA → MOTION → TRANSITIONS → VOICE/MUSIC → VIDEO EXPORT**
 
 Auto Edit is a simple, fast, premium-looking **image-to-video editor for Android**.
