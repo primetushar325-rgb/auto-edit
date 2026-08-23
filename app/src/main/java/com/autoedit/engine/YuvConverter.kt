@@ -98,14 +98,11 @@ object YuvConverter {
             val yBase = yy * yRow
             for (xx in 0 until w) {
                 val yv = (y.get(yBase + xx).toInt()) and 0xFF
-                var uVal = 128
-                var vVal = 128
-                if (xx and 1 == 0) {
-                    val uIdx = if (uPix == 1) cy * uRow + xx / 2 else cy * uRow + xx
-                    val vIdx = if (vPix == 1) cy * vRow + xx / 2 else cy * vRow + xx
-                    uVal = (if (uIdx in 0 until uCap) u.get(uIdx).toInt() else { u.get(uCap - 1).toInt(); clamped++ }) and 0xFF
-                    vVal = (if (vIdx in 0 until vCap) v.get(vIdx).toInt() else { v.get(vCap - 1).toInt(); clamped++ }) and 0xFF
-                }
+                // 4:2:0 - every pixel takes the chroma sample of its 2x2 block
+                val uIdx = if (uPix == 1) cy * uRow + xx / 2 else cy * uRow + xx
+                val vIdx = if (vPix == 1) cy * vRow + xx / 2 else cy * vRow + xx
+                val uVal = (if (uIdx in 0 until uCap) u.get(uIdx).toInt() else { u.get(uCap - 1).toInt(); clamped++ }) and 0xFF
+                val vVal = (if (vIdx in 0 until vCap) v.get(vIdx).toInt() else { v.get(vCap - 1).toInt(); clamped++ }) and 0xFF
                 val r = (yv + 1.402 * (vVal - 128)).toInt().coerceIn(0, 255)
                 val g = (yv - 0.344 * (uVal - 128) - 0.714 * (vVal - 128)).toInt().coerceIn(0, 255)
                 val b = (yv + 1.772 * (uVal - 128)).toInt().coerceIn(0, 255)
@@ -121,11 +118,11 @@ object YuvConverter {
     /** Minimum byte count a plane of these strides must hold (luma). */
     fun minLumaSize(w: Int, h: Int, rowStride: Int): Int = (h - 1) * rowStride + w
 
-    /** Minimum byte count a chroma plane of these strides must hold. */
+    /** Minimum byte count a chroma plane of these strides must hold
+     *  (h/2 stride-aligned rows - what encoders actually allocate). */
     fun minChromaSize(w: Int, h: Int, rowStride: Int, pixelStride: Int): Int {
         val chromaH = h / 2
         if (chromaH == 0) return 0
-        return if (pixelStride == 1) (chromaH - 1) * rowStride + w / 2
-        else (chromaH - 1) * rowStride + w - 1
+        return chromaH * rowStride
     }
 }

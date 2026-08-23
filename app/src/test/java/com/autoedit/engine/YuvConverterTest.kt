@@ -25,8 +25,9 @@ class YuvConverterTest {
         val v = plane(uCap)
         val clamped = YuvConverter.rgbToYuv420(rgb, w, h, y, 1920, u, 1920, 1, v, 1920, 1)
         assertEquals("planar 1080p must fit with zero clamped writes", 0, clamped)
-        // the last valid U index is 1,036,799 - the old code wrote at 1,036,800
-        assertEquals(uCap - 1, YuvConverter.minChromaSize(w, h, 1920, 1))
+        // the U plane holds exactly 1920*540 = 1,036,800 bytes (last index 1,036,799)
+        // - the old code wrote at index 1,036,800, one past the end
+        assertEquals(uCap, YuvConverter.minChromaSize(w, h, 1920, 1))
         // luma is fully populated
         assertTrue(y.get(YuvConverter.maxLumaIndex(w, h, 1920)).toInt() and 0xFF in 0..255)
     }
