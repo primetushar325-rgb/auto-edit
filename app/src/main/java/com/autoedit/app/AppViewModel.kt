@@ -439,19 +439,33 @@ class AppViewModel(app: Application) : ViewModel() {
         }
         val inC = inMs.coerceIn(0L, (durSec * 1000).toLong() - 200)
         val outC = outMs.coerceIn(inC + 200, (durSec * 1000).toLong())
-        _ui.update { it.copy(pendingVideo = null) }
-        mutate { pr ->
-            val clips = pr.clips.toMutableList()
-            val at = insertAt.coerceIn(0, clips.size)
-            clips.add(at, ClipRef(uri = s, type = ClipType.VIDEO, videoInMs = inC, videoOutMs = outC))
-            // junctions at/after the insertion shift by one
-            val junctions = pr.junctionTransitions.mapKeys {
-                if (it.key >= at) it.key + 1 else it.key
+        mainScope.launch {
+            toast("Saving video into project…")
+            val localPath = withContext(Dispatchers.IO) {
+                val p = current() ?: return@withContext null
+                val name = runCatching { com.autoedit.media.ImageLoader.displayName(app, s, "video") }.getOrDefault("video.mp4")
+                val ext = name.substringAfterLast('.', "mp4").lowercase().takeIf { it.length in 1..5 } ?: "mp4"
+                val dest = File(ProjectStorage.sourceDir(app, p.id), "video_${System.currentTimeMillis()}.$ext")
+                if (ProjectStorage.copyUriTo(app, s, dest)) dest.absolutePath else null
             }
-            pr.copy(clips = clips, junctionTransitions = junctions)
+            if (localPath == null) {
+                toast("Video could not be copied into the project")
+                return@launch
+            }
+            _ui.update { it.copy(pendingVideo = null) }
+            mutate { pr ->
+                val clips = pr.clips.toMutableList()
+                val at = insertAt.coerceIn(0, clips.size)
+                clips.add(at, ClipRef(uri = localPath, type = ClipType.VIDEO, videoInMs = inC, videoOutMs = outC))
+                // junctions at/after the insertion shift by one
+                val junctions = pr.junctionTransitions.mapKeys {
+                    if (it.key >= at) it.key + 1 else it.key
+                }
+                pr.copy(clips = clips, junctionTransitions = junctions)
+            }
+            val seg = (outC - inC) / 1000.0
+            toast("Video added (${fmtTime(seg)} segment)")
         }
-        val seg = (outC - inC) / 1000.0
-        toast("Video added (${fmtTime(seg)} segment)")
     }
 
     fun cancelVideo() {
@@ -542,6 +556,16 @@ class AppViewModel(app: Application) : ViewModel() {
             audio.loadMusic(_ui.value.music)
             toast("Music added (${fmtTime(dur)})")
         }
+    }
+
+    fun updateVoice(block: (AudioConfig) -> AudioConfig) {
+        mutate { pr -> pr.copy(voice = pr.voice?.let(block)) }
+        audio.loadVoice(_ui.value.voice)
+    }
+
+    fun updateMusic(block: (AudioConfig) -> AudioConfig) {
+        mutate { pr -> pr.copy(music = pr.music?.let(block)) }
+        audio.loadMusic(_ui.value.music)
     }
 
     fun removeVoice() {
@@ -723,7 +747,8 @@ class AppViewModel(app: Application) : ViewModel() {
                  showRename: Boolean = _ui.value.showRename,
                  showZoomEditor: Int? = _ui.value.showZoomEditor,
                  showJunction: Int? = _ui.value.showJunction,
-                 pendingVideo: Pair<String, Double>? = _ui.value.pendingVideo) {
+                 pendingVideo: Pair<String, Double>? = _ui.value.pendingVideo,
+                 showStorage: Boolean = _ui.value.showStorage) {
         _ui.update {
             it.copy(
                 showFormula = showFormula,
@@ -733,9 +758,46 @@ class AppViewModel(app: Application) : ViewModel() {
                 showRename = showRename,
                 showZoomEditor = showZoomEditor,
                 showJunction = showJunction,
-                pendingVideo = pendingVideo
+                pendingVideo = pendingVideo,
+                showStorage = showStorage
             )
         }
+    }
+
+    // ---------------------------------------------------------------- storage
+
+    fun openStorage() {
+        _ui.update { it.copy(showStorage = true) }
+        loadStorageInfo()
+    }
+
+    fun closeStorage() {
+        _ui.update { it.copy(showStorage = false) }
+    }
+
+    private fun loadStorageInfo() {
+        mainScope.launch {
+            val (rows, total) = withContext(Dispatchers.IO) {
+                val base = ProjectStorage.baseDir(app)
+                val rows = base.listFiles()?.filter { it.isDirectory }?.map { d ->
+                    val id = d.name
+                    val pm = runCatching { repo.load(id) }.getOrNull()
+                    StorageRow(id, pm?.name ?: id, ProjectStorage.folderSize(app, id))
+                }?.sortedByDescending { it.size } ?: emptyList()
+                val total = base.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+                rows to total
+            }
+            _ui.update { it.copy(storageRows = rows, storageTotal = total) }
+        }
+    }
+
+    fun fmtBytes(bytes: Long): String {
+        if (bytes < 1024) return "$bytes B"
+        val kb = bytes / 1024.0
+        if (kb < 1024) return "${"%.0f".format(kb)} KB"
+        val mb = kb / 1024.0
+        if (mb < 1024) return "${"%.1f".format(mb)} MB"
+        return "${"%.2f".format(mb / 1024.0)} GB"
     }
 
     /** Read-only snapshot for the preview renderer. */
