@@ -262,8 +262,10 @@ class MixedTimelineTest {
     fun `default project transition is never flash (no surprise white flash)`() {
         val p = ProjectModel("p", "p", 0, 0, clips = List(3) { ClipRef(uri = "u$it") })
         assertEquals(TransitionType.CROSS_DISSOLVE, p.transition)
-        // junctions empty -> every junction resolves to the non-flash default
-        for (i in 0..3) assertEquals(TransitionType.CROSS_DISSOLVE, p.junctionTransition(i) ?: TransitionType.NONE)
+        // junction 0 does not exist (no cut before the first clip)
+        assertNull(p.junctionTransition(0))
+        // junctions empty -> every real junction resolves to the non-flash default
+        for (i in 1..3) assertEquals(TransitionType.CROSS_DISSOLVE, p.junctionTransition(i))
     }
 
     @Test
