@@ -104,9 +104,9 @@ class YuvConverterTest {
         for (i in rgb.indices) {
             val a = rgb[i]
             val b = back[i]
-            val dr = (a ushr 16) - (b ushr 16)
-            val dg = (a ushr 8) - (b ushr 8)
-            val db = a - b
+            val dr = ((a ushr 16) and 0xFF) - ((b ushr 16) and 0xFF)
+            val dg = ((a ushr 8) and 0xFF) - ((b ushr 8) and 0xFF)
+            val db = (a and 0xFF) - (b and 0xFF)
             maxDiff = maxOf(maxDiff, kotlin.math.abs(dr), kotlin.math.abs(dg), kotlin.math.abs(db))
         }
         assertTrue("max channel diff was $maxDiff (want <= 6 for BT.601)", maxDiff <= 6)
