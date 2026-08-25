@@ -169,14 +169,16 @@ class Media3VideoExporter(private val ctx: Context) {
 
         val videoEffects = mutableListOf<Effect>()
 
-        // Gentle Ken Burns zoom: 1.0 -> 1.04 for even clips, 1.04 -> 1.0 for odd.
-        // Keep the zoom subtle (safe range) and always center the image.
-        if (clip.type == ClipType.IMAGE) {
-            val zoomIn = index % 2 == 0
-            val startScale = if (zoomIn) 1.00f else 1.04f
-            val endScale = if (zoomIn) 1.04f else 1.00f
-            videoEffects += KenBurnsEffect(durationMs, startScale, endScale, preset.fps)
-        }
+        // NOTE: A Ken Burns / zoom matrix effect is intentionally NOT applied here.
+        // Media3 1.4.x clips scaled quads against the NDC cube and re-triangulates,
+        // which can leave a degenerate black triangle burned into every frame when
+        // scale pushes vertices to/through the NDC boundary (>=1.0). That triangle
+        // only appeared in the encoded output (in-app preview uses a separate
+        // Compose Canvas), matching the reported bug. We letterbox instead, which
+        // only ever scales DOWN, so vertices stay within NDC and no clipping runs.
+        // Motion on images is handled by the project's clip duration; if Ken Burns
+        // is later re-added it must use a crop/scale effect that stays within
+        // [0,1] or a custom shader program without the NDC polygon clipping.
 
         // Letterbox to the exact output frame (no stretch, no unexpected crop).
         videoEffects += Presentation.createForWidthAndHeight(

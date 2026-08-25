@@ -144,6 +144,12 @@ class GpuFrameRenderer(
         progClipRgba = buildProgram(VERT, FRAG_CLIP_RGBA)
         progClipYuv = buildProgram(VERT, FRAG_CLIP_YUV)
         progComp = buildProgram(VERT, FRAG_COMP)
+        // Defensive GL state: never cull back faces (a negative Y scale for the
+        // NDC flip could otherwise drop one triangle of the quad and leave a
+        // black triangle on screen), and don't blend against stale pixels.
+        GLES20.glDisable(GLES20.GL_CULL_FACE)
+        GLES20.glDisable(GLES20.GL_BLEND)
+        GLES20.glClearColor(0f, 0f, 0f, 1f)
         checkGl("initGl")
     }
 
