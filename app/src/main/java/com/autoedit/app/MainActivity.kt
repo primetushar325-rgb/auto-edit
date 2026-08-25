@@ -33,7 +33,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
@@ -83,21 +85,25 @@ fun AppRoot() {
             // AnimatedContent guarantees the previous screen is removed before the
             // next one is shown (short cross-fade), so no stale Composable/canvas
             // content can "bleed through" during fast navigation.
-            val target: @Composable () -> Unit = when {
-                ui.showStorage -> @Composable { StorageScreen(vm) }
-                ui.screen == AppViewModel.Screen.Editor && ui.projectId != null ->
-                    @Composable { EditorScreen(vm) }
-                else -> @Composable { HomeScreen(vm) }
+            val screenKey = when {
+                ui.showStorage -> "storage"
+                ui.screen == AppViewModel.Screen.Editor && ui.projectId != null -> "editor"
+                else -> "home"
             }
             AnimatedContent(
-                targetState = target,
+                targetState = screenKey,
                 transitionSpec = {
-                    (fadeIn(animationSpec = tween(220)) +
-                        slideInHorizontally(tween(220)) { it / 16 }) togetherWith
-                        fadeOut(animationSpec = tween(140))
+                    (fadeIn(animationSpec = tween(220)) togetherWith
+                        fadeOut(animationSpec = tween(140)))
                 },
                 label = "screen"
-            ) { content -> content() }
+            ) { key ->
+                when (key) {
+                    "storage" -> StorageScreen(vm)
+                    "editor" -> EditorScreen(vm)
+                    else -> HomeScreen(vm)
+                }
+            }
             ToastBar(ui.toast, ui.toastAt, vm::dismissToast)
         }
     }

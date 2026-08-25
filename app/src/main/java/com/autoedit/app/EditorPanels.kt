@@ -289,8 +289,7 @@ private fun ExportProgressView(ui: AppViewModel.Ui, onCancel: () -> Unit) {
             .height(8.dp)
             .clip(RoundedCornerShape(4.dp)),
         color = AeGold,
-        trackColor = AeSurface3,
-        gapSize = 0.dp
+        trackColor = AeSurface3
     )
     Spacer(Modifier.height(14.dp))
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -440,7 +439,7 @@ private fun ExportSuccessDialog(out: AppViewModel.ExportOutcome, vm: AppViewMode
 }
 
 @Composable
-private fun StatChip(label: String, value: String) {
+private fun RowScope.StatChip(label: String, value: String) {
     Column(
         modifier = Modifier
             .weight(1f)
