@@ -50,8 +50,8 @@ class AppViewModelFactory(private val app: Application) : ViewModelProvider.Fact
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.statusBarColor = Color.BLACK
-        window.navigationBarColor = Color.BLACK
+        window.statusBarColor = Color.Black.toArgb()
+        window.navigationBarColor = Color.Black.toArgb()
         setContent {
             AutoEditTheme {
                 AppRoot()
