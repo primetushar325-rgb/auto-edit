@@ -5,17 +5,17 @@ import android.media.MediaCodecInfo
 import android.net.Uri
 import android.os.Looper
 import android.util.Log
+import androidx.media3.common.Effect
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.effect.Effects
 import androidx.media3.effect.Presentation
-import androidx.media3.effect.VideoEffect
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.DefaultEncoderFactory
 import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.EditedMediaItemSequence
+import androidx.media3.transformer.Effects
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.ProgressHolder
@@ -167,7 +167,7 @@ class Media3VideoExporter(private val ctx: Context) {
             )
         }
 
-        val videoEffects = mutableListOf<androidx.media3.effect.VideoEffect>()
+        val videoEffects = mutableListOf<Effect>()
 
         // Gentle Ken Burns zoom: 1.0 -> 1.04 for even clips, 1.04 -> 1.0 for odd.
         // Keep the zoom subtle (safe range) and always center the image.
