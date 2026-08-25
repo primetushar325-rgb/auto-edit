@@ -11,6 +11,7 @@ import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.Effects
 import androidx.media3.effect.Presentation
+import androidx.media3.effect.VideoEffect
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.DefaultEncoderFactory
 import androidx.media3.transformer.EditedMediaItem
@@ -26,6 +27,7 @@ import com.google.common.collect.ImmutableList
 import kotlinx.coroutines.CompletableDeferred
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.roundToLong
 
 /**
@@ -229,7 +231,7 @@ class Media3VideoExporter(private val ctx: Context) {
                     exportResult: ExportResult,
                     exportException: ExportException
                 ) {
-                    Log.e(TAG, "Transformer onError: ${exportException.errorCodeName} ${exportException.message}", exportException)
+                    Log.e(TAG, "Transformer onError (code=${exportException.errorCode}): ${exportException.message}", exportException)
                     error.compareAndSet(null, exportException)
                     done.complete(Unit)
                 }
