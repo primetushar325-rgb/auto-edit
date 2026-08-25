@@ -98,7 +98,18 @@ class AppViewModel(app: Application) : ViewModel() {
         val exporting: Boolean = false,
         val exportProgress: Float = 0f,
         val exportStage: String = "",
+        val exportElapsedMs: Long = 0L,
+        val lastExport: ExportOutcome? = null,
         val needStoragePermission: Boolean = false
+    )
+
+    data class ExportOutcome(
+        val filePath: String,
+        val displayName: String,
+        val sizeBytes: Long,
+        val durationSec: Double,
+        val mediaStoreSaved: Boolean,
+        val thumbnailPath: String?
     )
 
     data class StorageRow(val id: String, val name: String, val size: Long)
@@ -718,6 +729,7 @@ class AppViewModel(app: Application) : ViewModel() {
                 }
             }
         }
+        val startMs = System.currentTimeMillis()
         exportJob = mainScope.launch {
             val snapshot = p
             val tempDir = ProjectStorage.tempDir(app, p.id)
@@ -728,19 +740,46 @@ class AppViewModel(app: Application) : ViewModel() {
                     { cancelFlag.get() }
                 ) { prog, stage ->
                     lastProgressMs.set(System.currentTimeMillis())
-                    _ui.update { it.copy(exportProgress = prog, exportStage = stage) }
+                    _ui.update {
+                        it.copy(
+                            exportProgress = prog,
+                            exportStage = stage,
+                            exportElapsedMs = System.currentTimeMillis() - startMs
+                        )
+                    }
                 }
             }
             stallJob?.cancel()
             stallJob = null
             _ui.update { it.copy(exporting = false) }
             result.onSuccess { res ->
-                val where = if (res.mediaStoreUri != null) {
-                    "Video saved to Movies/Auto Edit (copy also in the project folder)"
-                } else {
-                    "Video saved in the project folder (Movies copy failed: ${res.file.name})"
+                // Build a thumbnail for the success screen (first frame).
+                val thumb = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val out = File(res.file.parentFile, "thumb_${res.file.nameWithoutExtension}.jpg")
+                        val bmp = android.media.MediaMetadataRetriever().use { r ->
+                            r.setDataSource(res.file.absolutePath)
+                            r.getFrameAtTime(500_000)
+                        }
+                        if (bmp != null) {
+                            out.outputStream().use { bmp.compress(Bitmap.CompressFormat.JPEG, 85, it) }
+                            bmp.recycle()
+                            out.absolutePath
+                        } else null
+                    }.getOrNull()
                 }
-                toast(where)
+                _ui.update {
+                    it.copy(
+                        lastExport = ExportOutcome(
+                            filePath = res.file.absolutePath,
+                            displayName = res.file.name,
+                            sizeBytes = res.file.length(),
+                            durationSec = snapshot.totalDuration(),
+                            mediaStoreSaved = res.mediaStoreUri != null,
+                            thumbnailPath = thumb
+                        )
+                    )
+                }
             }.onFailure { e ->
                 // always a specific, actionable message - never a generic one
                 val msg = when {
@@ -770,6 +809,43 @@ class AppViewModel(app: Application) : ViewModel() {
 
     fun cancelExport() {
         forceCancelExport(null)
+    }
+
+    fun dismissExportResult() {
+        _ui.update { it.copy(lastExport = null) }
+    }
+
+    fun shareLastExport() {
+        val out = _ui.value.lastExport ?: return
+        mainScope.launch {
+            val uri = androidx.core.content.FileProvider.getUriForFile(
+                app, "${app.packageName}.fileprovider", File(out.filePath)
+            )
+            val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                type = "video/mp4"
+                putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            app.startActivity(android.content.Intent.createChooser(intent, "Share video").apply {
+                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            })
+        }
+    }
+
+    fun openLastExport() {
+        val out = _ui.value.lastExport ?: return
+        mainScope.launch {
+            val uri = androidx.core.content.FileProvider.getUriForFile(
+                app, "${app.packageName}.fileprovider", File(out.filePath)
+            )
+            val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "video/mp4")
+                addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            runCatching { app.startActivity(intent) }.onFailure { toast("No app found to play video") }
+        }
     }
 
     // ---------------------------------------------------------------- misc

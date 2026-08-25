@@ -46,16 +46,9 @@ fun StorageScreen(vm: AppViewModel) {
                 .padding(top = 14.dp, bottom = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                text = "\u2190",
-                style = MaterialTheme.typography.titleLarge,
-                color = AeText,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(AeCard)
-                    .clickable { vm.closeStorage() }
-                    .padding(horizontal = 12.dp, vertical = 4.dp)
-            )
+            AeIconButton(AeIcon.Kind.BACK, size = 40, background = AeSurface2, tint = AeText) {
+                vm.closeStorage()
+            }
             Spacer(Modifier.width(12.dp))
             Text(
                 "STORAGE",
@@ -68,7 +61,7 @@ fun StorageScreen(vm: AppViewModel) {
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(16.dp))
-                .background(AeCard)
+                .background(AeSurface)
                 .padding(16.dp)
         ) {
             Column {
@@ -91,19 +84,11 @@ fun StorageScreen(vm: AppViewModel) {
         }
         Spacer(Modifier.height(14.dp))
         if (ui.storageRows.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(AeCard)
-                    .padding(24.dp)
-            ) {
-                Text(
-                    "No projects stored yet.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = AeTextDim
-                )
-            }
+            EmptyState(
+                title = "Nothing stored yet",
+                subtitle = "Exported videos and project files will appear here, all kept privately on this device.",
+                illustration = { AeIcon(AeIcon.Kind.FOLDER, size = 48.dp, tint = AeGoldDim) }
+            )
         } else {
             LazyColumn(
                 modifier = Modifier.weight(1f),
@@ -115,7 +100,7 @@ fun StorageScreen(vm: AppViewModel) {
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(16.dp))
-                            .background(AeCard)
+                            .background(AeSurface)
                             .padding(16.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -136,11 +121,16 @@ fun StorageScreen(vm: AppViewModel) {
                         Box(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(10.dp))
-                                .background(AeCharcoal)
+                                .background(AeSurface2)
                                 .clickable { vm.deleteProject(row.id) }
-                                .padding(horizontal = 12.dp, vertical = 8.dp)
+                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                            contentAlignment = Alignment.Center
                         ) {
-                            Text("DELETE", style = MaterialTheme.typography.labelMedium, color = AeDanger)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                AeIcon(AeIcon.Kind.TRASH, size = 16.dp, tint = AeDanger)
+                                Spacer(Modifier.width(6.dp))
+                                Text("DELETE", style = MaterialTheme.typography.labelMedium, color = AeDanger)
+                            }
                         }
                     }
                 }

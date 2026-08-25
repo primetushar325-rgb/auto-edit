@@ -61,6 +61,7 @@ fun HomeScreen(vm: AppViewModel) {
 
         GoldButton(
             text = "NEW PROJECT",
+            icon = AeIcon.Kind.SPARKLES,
             modifier = Modifier.fillMaxWidth(),
             onClick = { vm.newProject() }
         )
@@ -68,37 +69,28 @@ fun HomeScreen(vm: AppViewModel) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             SecondaryButton(
                 text = "FORMULA",
+                icon = AeIcon.Kind.SETTINGS,
                 modifier = Modifier.weight(1f),
                 onClick = { showFormulas = true }
             )
             SecondaryButton(
                 text = "STORAGE",
+                icon = AeIcon.Kind.FOLDER,
                 modifier = Modifier.weight(1f),
                 onClick = { vm.openStorage() }
             )
         }
 
         Spacer(Modifier.height(28.dp))
-        Text(
-            text = "RECENT PROJECTS",
-            style = MaterialTheme.typography.labelLarge,
-            color = AeGold
-        )
-        Spacer(Modifier.height(10.dp))
+        SectionHeader("RECENT PROJECTS")
+        Spacer(Modifier.height(12.dp))
 
         if (ui.projects.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(AeCard, RoundedCornerShape(16.dp))
-                    .padding(24.dp)
-            ) {
-                Text(
-                    text = "No projects yet.\nTap NEW PROJECT, pick your images and Auto Edit takes over.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = AeTextDim
-                )
-            }
+            EmptyState(
+                title = "No projects yet",
+                subtitle = "Tap NEW PROJECT, pick your images and Auto Edit turns them into a cinematic video.",
+                illustration = { AeIcon(AeIcon.Kind.FILM, size = 48.dp, tint = AeGoldDim) }
+            )
         } else {
             LazyColumn(
                 modifier = Modifier.weight(1f),
@@ -207,18 +199,19 @@ private fun ProjectCard(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(AeCard, RoundedCornerShape(16.dp))
+            .clip(RoundedCornerShape(16.dp))
+            .background(AeSurface)
             .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .padding(16.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Box(
             modifier = Modifier
-                .size(44.dp)
-                .background(AeCharcoal, RoundedCornerShape(12.dp)),
+                .size(46.dp)
+                .background(AeSurface2, RoundedCornerShape(12.dp)),
             contentAlignment = Alignment.Center
         ) {
-            Text("IMG", style = MaterialTheme.typography.labelSmall, color = AeGold)
+            AeIcon(AeIcon.Kind.FILM, size = 22.dp, tint = AeGold)
         }
         Spacer(Modifier.width(14.dp))
         Column(modifier = Modifier.weight(1f)) {
@@ -235,6 +228,6 @@ private fun ProjectCard(
                 color = AeTextDim
             )
         }
-        Text("›", style = MaterialTheme.typography.titleLarge, color = AeTextDim)
+        AeIcon(AeIcon.Kind.CHEVRON_RIGHT, size = 20.dp, tint = AeTextDim)
     }
 }

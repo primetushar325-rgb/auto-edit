@@ -4,8 +4,13 @@ import android.Manifest
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -188,16 +193,9 @@ fun EditorScreen(vm: AppViewModel) {
                     .padding(top = 14.dp, bottom = 10.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "\u2190",
-                    style = MaterialTheme.typography.titleLarge,
-                    color = AeText,
-                    modifier = Modifier
-                        .clip(CircleShape)
-                        .background(AeCard)
-                        .clickable { vm.goHome() }
-                        .padding(horizontal = 12.dp, vertical = 4.dp)
-                )
+                AeIconButton(AeIcon.Kind.BACK, size = 40, background = AeSurface2, tint = AeText) {
+                    vm.goHome()
+                }
                 Spacer(Modifier.width(12.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
@@ -217,8 +215,8 @@ fun EditorScreen(vm: AppViewModel) {
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(10.dp))
-                        .background(AeCard)
-                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                        .background(AeSurface2)
+                        .padding(horizontal = 12.dp, vertical = 7.dp)
                 ) {
                     Text(
                         text = vm.fmtTime(ui.totalDurationSec),
@@ -232,24 +230,30 @@ fun EditorScreen(vm: AppViewModel) {
             if (n == 0) {
                 EmptyPreview(onAdd = { launchImages() })
             } else {
-                Canvas(
+                // The order matters: opaque background is drawn FIRST and the
+                // Canvas clears itself to opaque black on every frame, so no
+                // previous screen's pixels can show through (the black-arrow /
+                // bleed-through glitch).
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .aspectRatio(previewAspectRatio(ui))
                         .clip(RoundedCornerShape(18.dp))
-                        .background(Color.Black)
+                        .background(Color(0xFF000000))
                         .clickable { vm.setPlaying(!ui.playing) }
                 ) {
-                    val p = proj
-                    if (p != null && p.clips.isNotEmpty()) {
-                        val state = TimelineMath.frameAt(
-                            playTime.toDouble(),
-                            p.clipDurations(),
-                            p.transitionDurationSec
-                        )
-                        drawFrame(p, state, p.clipDurations(), previewBmps.value)
-                    } else {
-                        drawRect(Color.Black)
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        // Always clear the full surface with opaque black first.
+                        drawRect(Color(0xFF000000))
+                        val p = proj
+                        if (p != null && p.clips.isNotEmpty()) {
+                            val state = TimelineMath.frameAt(
+                                playTime.toDouble(),
+                                p.clipDurations(),
+                                p.transitionDurationSec
+                            )
+                            drawFrame(p, state, p.clipDurations(), previewBmps.value)
+                        }
                     }
                 }
             }
@@ -261,32 +265,23 @@ fun EditorScreen(vm: AppViewModel) {
                     .padding(vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "\u27F2",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = AeTextDim,
-                    modifier = Modifier
-                        .clip(CircleShape)
-                        .background(AeCard)
-                        .clickable {
-                            playTime = 0f
-                            vm.audioTick(0.0)
-                        }
-                        .padding(horizontal = 14.dp, vertical = 6.dp)
-                )
+                AeIconButton(AeIcon.Kind.RESTART, size = 44, background = AeSurface2, tint = AeTextDim) {
+                    playTime = 0f
+                    vm.audioTick(0.0)
+                }
                 Spacer(Modifier.width(12.dp))
                 Box(
                     modifier = Modifier
-                        .size(52.dp)
+                        .size(56.dp)
                         .clip(CircleShape)
-                        .background(if (ui.playing) AeCardHi else AeGold)
+                        .background(if (ui.playing) AeSurface3 else AeGold)
                         .clickable { vm.setPlaying(!ui.playing) },
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        text = if (ui.playing) "\u2759\u2759" else "\u25B6",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = if (ui.playing) AeText else AeBlack
+                    AeIcon(
+                        if (ui.playing) AeIcon.Kind.PAUSE else AeIcon.Kind.PLAY,
+                        size = 24.dp,
+                        tint = if (ui.playing) AeText else Color(0xFF1A1405)
                     )
                 }
                 Spacer(Modifier.width(12.dp))
@@ -298,16 +293,9 @@ fun EditorScreen(vm: AppViewModel) {
                     )
                 }
                 Spacer(Modifier.weight(1f))
-                Text(
-                    text = "\u26F6",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = AeTextDim,
-                    modifier = Modifier
-                        .clip(CircleShape)
-                        .background(AeCard)
-                        .clickable { fullscreen = true }
-                        .padding(horizontal = 14.dp, vertical = 6.dp)
-                )
+                AeIconButton(AeIcon.Kind.EXPAND, size = 44, background = AeSurface2, tint = AeTextDim) {
+                    fullscreen = true
+                }
             }
 
             // ------------------------------------------------ scrolling body
@@ -317,16 +305,22 @@ fun EditorScreen(vm: AppViewModel) {
                     .verticalScroll(rememberScrollState())
             ) {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    ActionChip("IMAGES", "+", ui.clipCount == 0) { launchImages() }
-                    ActionChip("FORMULA", "\u2699") { vm.setSheet(showFormula = true) }
-                    ActionChip("VIDEO", "+") { pickVideo.launch("video/*") }
-                    ActionChip("VOICE", if (ui.voice != null) "\u2713" else "+") { pickVoice.launch("audio/*") }
-                    ActionChip("MUSIC", if (ui.music != null) "\u2713" else "+") { pickMusic.launch("audio/*") }
+                    ActionChip("IMAGES", AeIcon.Kind.IMAGE, ui.clipCount == 0) { launchImages() }
+                    ActionChip("FORMULA", AeIcon.Kind.SETTINGS) { vm.setSheet(showFormula = true) }
+                    ActionChip("VIDEO", AeIcon.Kind.VIDEO) { pickVideo.launch("video/*") }
+                    ActionChip("VOICE", if (ui.voice != null) AeIcon.Kind.CHECK else AeIcon.Kind.VOICE) {
+                        pickVoice.launch("audio/*")
+                    }
+                    ActionChip("MUSIC", if (ui.music != null) AeIcon.Kind.CHECK else AeIcon.Kind.MUSIC) {
+                        pickMusic.launch("audio/*")
+                    }
                 }
                 Spacer(Modifier.height(8.dp))
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    ActionChip("LOOK", "\u25CB", modifier = Modifier.weight(1f)) { vm.setSheet(showAdjust = true) }
-                    ActionChip("EXPORT", "\u25BC", gold = true, modifier = Modifier.weight(2f)) {
+                    ActionChip("LOOK", AeIcon.Kind.ADJUST, modifier = Modifier.weight(1f)) {
+                        vm.setSheet(showAdjust = true)
+                    }
+                    ActionChip("EXPORT", AeIcon.Kind.DOWNLOAD, gold = true, modifier = Modifier.weight(2f)) {
                         if (!ui.exporting) vm.setSheet(showExport = true)
                     }
                 }
@@ -348,7 +342,7 @@ fun EditorScreen(vm: AppViewModel) {
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
-                            .background(AeCard)
+                            .background(AeSurface)
                             .clickable { vm.cycleDuration() }
                             .padding(horizontal = 10.dp, vertical = 5.dp)
                     ) {
@@ -380,7 +374,7 @@ fun EditorScreen(vm: AppViewModel) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(AeCard, RoundedCornerShape(14.dp))
+                            .background(AeSurface, RoundedCornerShape(14.dp))
                             .padding(20.dp),
                         contentAlignment = Alignment.Center
                     ) {
@@ -440,19 +434,25 @@ private fun EmptyPreview(onAdd: () -> Unit) {
             .fillMaxWidth()
             .aspectRatio(16f / 9f)
             .clip(RoundedCornerShape(18.dp))
-            .background(AeCard),
+            .background(AeSurface),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        AutoEditLogo(size = 64.dp, withWordmark = false)
-        Spacer(Modifier.height(14.dp))
+        EmptyIllustration()
+        Spacer(Modifier.height(16.dp))
         Text(
-            text = "YOUR CLIPS WILL PREVIEW HERE",
-            style = MaterialTheme.typography.labelMedium,
+            text = "YOUR CLIPS PREVIEW HERE",
+            style = MaterialTheme.typography.labelLarge,
+            color = AeText
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = "Add images and they become a cinematic sequence",
+            style = MaterialTheme.typography.bodySmall,
             color = AeTextDim
         )
-        Spacer(Modifier.height(14.dp))
-        GoldButton(text = "+ ADD IMAGES", onClick = onAdd)
+        Spacer(Modifier.height(18.dp))
+        GoldButton(text = "ADD IMAGES", icon = AeIcon.Kind.PLUS, onClick = onAdd)
     }
 }
 
@@ -468,9 +468,11 @@ private fun FullscreenPreview(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.Black)
+            .background(Color(0xFF000000))
     ) {
         Canvas(modifier = Modifier.fillMaxSize().clickable { onTogglePlay() }) {
+            // Clear to opaque black first - no bleed-through in fullscreen.
+            drawRect(Color(0xFF000000))
             val p = proj
             if (p != null && p.clips.isNotEmpty()) {
                 val state = TimelineMath.frameAt(
@@ -479,25 +481,25 @@ private fun FullscreenPreview(
                     p.transitionDurationSec
                 )
                 drawFrame(p, state, p.clipDurations(), bmps)
-            } else {
-                drawRect(Color.Black)
             }
         }
-        Box(
+        AeIconButton(
+            icon = AeIcon.Kind.CLOSE,
+            size = 44,
+            background = AeSurface3,
+            tint = AeText,
             modifier = Modifier
                 .align(Alignment.TopEnd)
-                .padding(16.dp)
-                .clip(CircleShape)
-                .background(AeCard)
-                .clickable { onExit() }
-                .padding(horizontal = 14.dp, vertical = 8.dp)
-        ) {
-            Text("X", color = AeText, style = MaterialTheme.typography.titleSmall)
-        }
+                .padding(16.dp),
+            onClick = onExit
+        )
         Box(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 32.dp)
+                .clip(CircleShape)
+                .background(AeSurface3.copy(alpha = 0.85f))
+                .padding(horizontal = 18.dp, vertical = 8.dp)
         ) {
             Text(
                 text = "${vm_fmtTime(playTime.toDouble())} / ${vm_fmtTime(ui.totalDurationSec)}",
@@ -521,12 +523,20 @@ private fun TimelineRow(
     onJunctionClick: (Int) -> Unit
 ) {
     val thumbs = remember { mutableStateOf<Map<String, ImageBitmap>>(emptyMap()) }
+    val activeIdx = remember(ui.clipCount, ui.version) {
+        val d = ui.clipDurationSec
+        if (d > 0 && ui.clipCount > 0) {
+            // approximate active clip from play state is not exposed per-frame;
+            // first clip is subtly highlighted until playback drives it.
+            0
+        } else -1
+    }
     LazyRow(
         modifier = Modifier
             .fillMaxWidth()
-            .height(150.dp),
+            .height(158.dp),
         contentPadding = PaddingValues(horizontal = 2.dp, vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         items(ui.clipInfos, key = { "clip-${it.index}" }) { info ->
             val thumb = thumbs.value[info.uri]
@@ -536,19 +546,24 @@ private fun TimelineRow(
                     if (b != null) thumbs.value = thumbs.value + (info.uri to b)
                 }
             }
+            val selected = info.index == activeIdx
             Column(
                 modifier = Modifier
-                    .width(84.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(AeCard)
+                    .width(96.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .then(
+                        if (selected) Modifier.border(1.5.dp, AeGold, RoundedCornerShape(14.dp))
+                        else Modifier
+                    )
+                    .background(AeSurface)
                     .clickable { onClipClick(info.index) }
             ) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .aspectRatio(1f)
-                        .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
-                        .background(AeCharcoal),
+                        .clip(RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp))
+                        .background(AeSurface2),
                     contentAlignment = Alignment.Center
                 ) {
                     if (thumb != null) {
@@ -556,34 +571,36 @@ private fun TimelineRow(
                             bitmap = thumb,
                             contentDescription = if (info.isVideo) "Video ${info.index + 1}" else "Image ${info.index + 1}",
                             contentScale = ContentScale.Crop,
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
+                            modifier = Modifier.fillMaxSize()
                         )
                     } else {
-                        Text(
-                            if (info.isVideo) "VID" else "IMG",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = AeTextDim
+                        // lightweight skeleton while the thumbnail decodes
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(AeSurface3.copy(alpha = 0.5f))
+                        )
+                        AeIcon(
+                            if (info.isVideo) AeIcon.Kind.VIDEO else AeIcon.Kind.IMAGE,
+                            size = 22.dp,
+                            tint = AeTextDim
                         )
                     }
-                    // junction marker: tap to pick the transition for this gap (CapCut-style)
                     if (info.index > 0) {
+                        // junction marker (CapCut-style): tap to pick transition
                         Box(
                             modifier = Modifier
                                 .align(Alignment.TopStart)
-                                .padding(4.dp)
-                                .clip(RoundedCornerShape(5.dp))
-                                .background(
-                                    if (info.junctionLabel != null) AeGold else AeCardHi
-                                )
+                                .padding(5.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(if (info.junctionLabel != null) AeGold else AeSurface3.copy(alpha = 0.9f))
                                 .clickable { onJunctionClick(info.index) }
-                                .padding(horizontal = 5.dp, vertical = 2.dp)
+                                .padding(horizontal = 6.dp, vertical = 3.dp)
                         ) {
                             Text(
-                                text = if (info.junctionLabel != null) info.junctionLabel!!.take(8) else "\u25C6",
+                                text = info.junctionLabel?.take(6) ?: "✦",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = if (info.junctionLabel != null) AeBlack else AeTextDim,
+                                color = if (info.junctionLabel != null) Color(0xFF1A1405) else AeTextDim,
                                 maxLines = 1
                             )
                         }
@@ -591,34 +608,41 @@ private fun TimelineRow(
                     if (info.isVideo) {
                         Box(
                             modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .padding(4.dp)
-                                .clip(RoundedCornerShape(5.dp))
-                                .background(Color.Black.copy(alpha = 0.7f))
-                                .padding(horizontal = 5.dp, vertical = 2.dp)
+                                .align(Alignment.BottomEnd)
+                                .padding(5.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(Color.Black.copy(alpha = 0.65f))
+                                .padding(horizontal = 6.dp, vertical = 3.dp)
                         ) {
-                            Text("\u25B6 VID", style = MaterialTheme.typography.labelSmall, color = AeGold)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                AeIcon(AeIcon.Kind.PLAY, size = 10.dp, tint = AeGold)
+                                Spacer(Modifier.width(3.dp))
+                                Text("VIDEO", style = MaterialTheme.typography.labelSmall, color = AeGold)
+                            }
                         }
                     }
                 }
-                Column(
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(6.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
+                        .padding(horizontal = 8.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = (if (info.isVideo) "VID %03d" else "IMG %03d").format(info.index + 1),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = AeText,
-                        maxLines = 1
-                    )
-                    Text(
-                        text = info.motionLabel,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (info.zoomLabel != null) AeGold else AeTextDim,
-                        maxLines = 1
-                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = (if (info.isVideo) "VID %03d" else "IMG %03d").format(info.index + 1),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = AeText,
+                            maxLines = 1
+                        )
+                        Text(
+                            text = info.motionLabel,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (info.zoomLabel != null) AeGold else AeTextDim,
+                            maxLines = 1
+                        )
+                    }
+                    AeIcon(AeIcon.Kind.DRAG, size = 16.dp, tint = AeTextFaint)
                 }
             }
         }
@@ -628,28 +652,27 @@ private fun TimelineRow(
 @Composable
 private fun ActionChip(
     label: String,
-    icon: String,
+    icon: AeIcon.Kind,
     gold: Boolean = false,
     modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
+    val bg = if (gold) AeGold else AeSurface2
+    val fg = if (gold) Color(0xFF1A1405) else AeText
     Column(
         modifier = modifier
             .clip(RoundedCornerShape(14.dp))
-            .background(if (gold) AeGold else AeCard)
+            .background(bg)
             .clickable(onClick = onClick)
-            .padding(vertical = 10.dp),
+            .padding(vertical = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text(
-            text = icon,
-            style = MaterialTheme.typography.titleSmall,
-            color = if (gold) AeBlack else AeGold
-        )
+        AeIcon(icon, size = 20.dp, tint = if (gold) fg else AeGold)
+        Spacer(Modifier.height(6.dp))
         Text(
             text = label,
             style = MaterialTheme.typography.labelSmall,
-            color = if (gold) AeBlack else AeText,
+            color = fg,
             maxLines = 1
         )
     }

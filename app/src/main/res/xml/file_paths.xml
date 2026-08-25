@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Project export folder lives under app filesDir/projects/<id>/export -->
+    <files-path name="projects" path="projects/" />
+    <files-path name="exports" path="." />
+    <cache-path name="cache" path="." />
+</paths>

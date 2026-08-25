@@ -1,6 +1,9 @@
 package com.autoedit.app
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -9,10 +12,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -33,12 +39,17 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.dp
 import com.autoedit.engine.AspectRatio
 import com.autoedit.engine.ClipRef
@@ -47,45 +58,8 @@ import com.autoedit.engine.Formula
 import com.autoedit.engine.FormulaCatalog
 import com.autoedit.engine.Quality
 import com.autoedit.engine.TransitionType
+import java.io.File
 import kotlin.math.roundToInt
-
-@Composable
-fun GoldButton(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    Box(
-        modifier = modifier
-            .clip(RoundedCornerShape(16.dp))
-            .background(AeGold)
-            .clickable(onClick = onClick)
-            .padding(vertical = 16.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = text,
-            style = MaterialTheme.typography.titleSmall,
-            color = AeBlack,
-            letterSpacing = 1.2.sp
-        )
-    }
-}
-
-@Composable
-fun SecondaryButton(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    Box(
-        modifier = modifier
-            .clip(RoundedCornerShape(16.dp))
-            .background(AeCard)
-            .clickable(onClick = onClick)
-            .padding(vertical = 14.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = text,
-            style = MaterialTheme.typography.titleSmall,
-            color = AeText,
-            letterSpacing = 1.sp
-        )
-    }
-}
 
 /** Dimmed full-screen backdrop + bottom sheet card. */
 @Composable
@@ -93,7 +67,7 @@ fun SheetScaffold(title: String, onClose: () -> Unit, content: @Composable () ->
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.55f))
+            .background(Color(0xFF000000).copy(alpha = 0.62f))
             .clickable { onClose() }
     ) {
         Column(
@@ -101,27 +75,28 @@ fun SheetScaffold(title: String, onClose: () -> Unit, content: @Composable () ->
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
-                .background(AeCard)
+                .background(AeSurface)
                 .clickable { }
                 .padding(20.dp)
         ) {
+            // grab handle
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterHorizontally)
+                    .width(40.dp).height(4.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(AeSurface3)
+            )
+            Spacer(Modifier.height(14.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(title, style = MaterialTheme.typography.titleMedium, color = AeGold, modifier = Modifier.weight(1f))
-                Text(
-                    text = "X",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = AeTextDim,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(AeCharcoal)
-                        .clickable(onClick = onClose)
-                        .padding(horizontal = 10.dp, vertical = 4.dp)
-                )
+                AeIconButton(AeIcon.Kind.CLOSE, size = 36, background = AeSurface2, tint = AeTextDim, onClick = onClose)
             }
             Spacer(Modifier.height(14.dp))
             Column(
                 modifier = Modifier
-                    .weight(1f, fill = false)
+                    .fillMaxWidth()
+                    .heightIn(max = 560.dp)
                     .verticalScroll(rememberScrollState())
             ) {
                 content()
@@ -262,10 +237,17 @@ private fun SliderRow(label: String, value: Float, min: Float, max: Float, onCha
 @Composable
 fun ExportPanel(vm: AppViewModel) {
     val ui by vm.ui.collectAsState()
+
+    // Success screen (shown after a completed export until dismissed).
+    ui.lastExport?.let { out ->
+        ExportSuccessDialog(out, vm)
+        return
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.6f))
+            .background(Color(0xFF000000).copy(alpha = 0.62f))
             .clickable {
                 if (!ui.exporting) vm.setSheet(showExport = false)
             },
@@ -276,79 +258,207 @@ fun ExportPanel(vm: AppViewModel) {
                 .fillMaxWidth()
                 .padding(horizontal = 20.dp)
                 .clip(RoundedCornerShape(24.dp))
-                .background(AeCard)
+                .background(AeSurface)
                 .clickable { }
                 .padding(20.dp)
         ) {
             if (ui.exporting) {
-                Text("EXPORTING\u2026", style = MaterialTheme.typography.titleMedium, color = AeText)
-                Spacer(Modifier.height(6.dp))
-                Text(ui.exportStage, style = MaterialTheme.typography.bodySmall, color = AeTextDim)
-                Spacer(Modifier.height(16.dp))
-                LinearProgressIndicator(
-                    progress = { ui.exportProgress },
-                    modifier = Modifier.fillMaxWidth(),
-                    color = AeGold,
-                    trackColor = AeCharcoal
-                )
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    text = "${(ui.exportProgress * 100).roundToInt()}%",
-                    style = MaterialTheme.typography.headlineMedium,
-                    color = AeGold
-                )
-                Spacer(Modifier.height(20.dp))
-                SecondaryButton(text = "CANCEL EXPORT", onClick = { vm.cancelExport() })
+                ExportProgressView(ui) { vm.cancelExport() }
             } else {
-                Text("EXPORT VIDEO", style = MaterialTheme.typography.titleMedium, color = AeText)
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    text = "${ui.clipCount} images \u2022 ${vm.fmtTime(ui.totalDurationSec)} \u2022 fully offline",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = AeTextDim
-                )
-                Spacer(Modifier.height(16.dp))
-
-                ChipRow("ASPECT RATIO",
-                    AspectRatio.entries.map { it.label },
-                    index = AspectRatio.entries.indexOf(ui.aspect),
-                    onPick = { i -> vm.setAspect(AspectRatio.entries[i]) }
-                )
-                Spacer(Modifier.height(12.dp))
-                ChipRow("QUALITY",
-                    listOf("720p", "1080p", "4K"),
-                    index = Quality.entries.indexOf(ui.quality),
-                    onPick = { i -> vm.setQuality(Quality.entries[i]) }
-                )
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    text = "Output: ${ui.quality.resolutionFor(ui.aspect).first}\u00d7${ui.quality.resolutionFor(ui.aspect).second} px",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = AeTextDim
-                )
-                Spacer(Modifier.height(12.dp))
-                ChipRow("FRAME RATE",
-                    ExportConfig.FPS_OPTIONS.map { "${it} fps" },
-                    index = ExportConfig.FPS_OPTIONS.indexOf(ui.fps),
-                    onPick = { i -> vm.setFps(ExportConfig.FPS_OPTIONS[i]) }
-                )
-                Spacer(Modifier.height(20.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    SecondaryButton(
-                        text = "CANCEL",
-                        modifier = Modifier.weight(1f),
-                        onClick = { vm.setSheet(showExport = false) }
-                    )
-                    GoldButton(
-                        text = "EXPORT",
-                        modifier = Modifier.weight(1f),
-                        onClick = { vm.startExport() }
-                    )
-                }
+                ExportConfigView(ui, vm)
             }
         }
     }
 }
+
+@Composable
+private fun ExportProgressView(ui: AppViewModel.Ui, onCancel: () -> Unit) {
+    val pct = (ui.exportProgress * 100).roundToInt().coerceIn(0, 100)
+    val elapsedSec = (ui.exportElapsedMs / 1000).toInt()
+    val etaSec = if (ui.exportProgress in 0.02f..0.98f) {
+        (elapsedSec / ui.exportProgress - elapsedSec).toInt().coerceAtLeast(0)
+    } else -1
+    Text("EXPORTING…", style = MaterialTheme.typography.titleMedium, color = AeText)
+    Spacer(Modifier.height(6.dp))
+    Text(ui.exportStage, style = MaterialTheme.typography.bodySmall, color = AeTextDim)
+    Spacer(Modifier.height(18.dp))
+    LinearProgressIndicator(
+        progress = { ui.exportProgress },
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(8.dp)
+            .clip(RoundedCornerShape(4.dp)),
+        color = AeGold,
+        trackColor = AeSurface3,
+        gapSize = 0.dp
+    )
+    Spacer(Modifier.height(14.dp))
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("$pct%", style = MaterialTheme.typography.headlineMedium, color = AeGold)
+        Spacer(Modifier.weight(1f))
+        if (etaSec >= 0) {
+            Text(
+                "~${etaSec / 60}:${(etaSec % 60).toString().padStart(2, '0')} left",
+                style = MaterialTheme.typography.labelMedium,
+                color = AeTextDim
+            )
+            Spacer(Modifier.width(10.dp))
+        }
+        Text(
+            "elapsed ${elapsedSec / 60}:${(elapsedSec % 60).toString().padStart(2, '0')}",
+            style = MaterialTheme.typography.labelMedium,
+            color = AeTextDim
+        )
+    }
+    Spacer(Modifier.height(22.dp))
+    SecondaryButton(text = "CANCEL", icon = AeIcon.Kind.CLOSE, onClick = onCancel)
+}
+
+@Composable
+private fun ExportConfigView(ui: AppViewModel.Ui, vm: AppViewModel) {
+    Text("EXPORT VIDEO", style = MaterialTheme.typography.titleMedium, color = AeText)
+    Spacer(Modifier.height(4.dp))
+    Text(
+        text = "${ui.clipCount} images \u2022 ${vm.fmtTime(ui.totalDurationSec)} \u2022 fully offline",
+        style = MaterialTheme.typography.bodySmall,
+        color = AeTextDim
+    )
+    Spacer(Modifier.height(16.dp))
+    ChipRow("ASPECT RATIO",
+        AspectRatio.entries.map { it.label },
+        index = AspectRatio.entries.indexOf(ui.aspect),
+        onPick = { i -> vm.setAspect(AspectRatio.entries[i]) }
+    )
+    Spacer(Modifier.height(12.dp))
+    ChipRow("QUALITY",
+        listOf("720p", "1080p", "4K"),
+        index = Quality.entries.indexOf(ui.quality),
+        onPick = { i -> vm.setQuality(Quality.entries[i]) }
+    )
+    Spacer(Modifier.height(4.dp))
+    Text(
+        text = "Output: ${ui.quality.resolutionFor(ui.aspect).first}\u00d7${ui.quality.resolutionFor(ui.aspect).second} px",
+        style = MaterialTheme.typography.bodySmall,
+        color = AeTextDim
+    )
+    Spacer(Modifier.height(12.dp))
+    ChipRow("FRAME RATE",
+        ExportConfig.FPS_OPTIONS.map { "${it} fps" },
+        index = ExportConfig.FPS_OPTIONS.indexOf(ui.fps),
+        onPick = { i -> vm.setFps(ExportConfig.FPS_OPTIONS[i]) }
+    )
+    Spacer(Modifier.height(20.dp))
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        SecondaryButton(
+            text = "CANCEL",
+            modifier = Modifier.weight(1f),
+            onClick = { vm.setSheet(showExport = false) }
+        )
+        GoldButton(
+            text = "EXPORT",
+            icon = AeIcon.Kind.DOWNLOAD,
+            modifier = Modifier.weight(1f),
+            onClick = { vm.startExport() }
+        )
+    }
+}
+
+@Composable
+private fun ExportSuccessDialog(out: AppViewModel.ExportOutcome, vm: AppViewModel) {
+    val thumb = out.thumbnailPath?.let { remember(it) { imageBitmapFromPath(it) } }
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF000000).copy(alpha = 0.68f))
+            .clickable { vm.dismissExportResult() },
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 22.dp)
+                .clip(RoundedCornerShape(24.dp))
+                .background(AeSurface)
+                .clickable { }
+                .padding(22.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            AeIcon(AeIcon.Kind.CHECK, size = 40.dp, tint = AeSuccess)
+            Spacer(Modifier.height(10.dp))
+            Text("VIDEO READY", style = MaterialTheme.typography.titleLarge, color = AeText)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Saved to ${if (out.mediaStoreSaved) "Movies/Auto Edit" else "project folder"}",
+                style = MaterialTheme.typography.bodySmall,
+                color = AeTextDim,
+                textAlign = TextAlign.Center
+            )
+            Spacer(Modifier.height(16.dp))
+            if (thumb != null) {
+                Image(
+                    bitmap = thumb,
+                    contentDescription = "Exported video preview",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(16f / 9f)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(AeSurface2)
+                )
+                Spacer(Modifier.height(16.dp))
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                StatChip("Duration", vm.fmtTime(out.durationSec))
+                StatChip("Size", vm.fmtBytes(out.sizeBytes))
+            }
+            Spacer(Modifier.height(20.dp))
+            GoldButton(
+                text = "SHARE",
+                icon = AeIcon.Kind.SHARE,
+                modifier = Modifier.fillMaxWidth(),
+                onClick = { vm.shareLastExport() }
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                SecondaryButton(
+                    text = "OPEN",
+                    icon = AeIcon.Kind.PLAY,
+                    modifier = Modifier.weight(1f),
+                    onClick = { vm.openLastExport() }
+                )
+                SecondaryButton(
+                    text = "DONE",
+                    modifier = Modifier.weight(1f),
+                    onClick = { vm.dismissExportResult() }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun StatChip(label: String, value: String) {
+    Column(
+        modifier = Modifier
+            .weight(1f)
+            .clip(RoundedCornerShape(12.dp))
+            .background(AeSurface2)
+            .padding(12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(label, style = MaterialTheme.typography.labelSmall, color = AeTextDim)
+        Spacer(Modifier.height(2.dp))
+        Text(value, style = MaterialTheme.typography.titleSmall, color = AeGold)
+    }
+}
+
+private fun imageBitmapFromPath(path: String): ImageBitmap? = runCatching {
+    val bmp = android.graphics.BitmapFactory.decodeFile(path) ?: return null
+    bmp.asImageBitmap()
+}.getOrNull()
 
 @Composable
 private fun ChipRow(label: String, options: List<String>, index: Int, onPick: (Int) -> Unit) {
@@ -390,10 +500,15 @@ fun AudioCard(vm: AppViewModel, isVoice: Boolean) {
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
-            .background(AeCard)
+            .background(AeSurface)
             .padding(16.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
+            AeIcon(
+                if (isVoice) AeIcon.Kind.VOICE else AeIcon.Kind.MUSIC,
+                size = 18.dp, tint = AeGold
+            )
+            Spacer(Modifier.width(8.dp))
             Text(label, style = MaterialTheme.typography.labelLarge, color = AeGold)
             Spacer(Modifier.width(10.dp))
             Text(
@@ -409,16 +524,9 @@ fun AudioCard(vm: AppViewModel, isVoice: Boolean) {
                 color = AeText
             )
             Spacer(Modifier.width(8.dp))
-            Text(
-                text = "\u2715",
-                style = MaterialTheme.typography.titleSmall,
-                color = AeDanger,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(AeCharcoal)
-                    .clickable { if (isVoice) vm.removeVoice() else vm.removeMusic() }
-                    .padding(horizontal = 8.dp, vertical = 4.dp)
-            )
+            AeIconButton(AeIcon.Kind.CLOSE, size = 34, background = AeSurface2, tint = AeDanger) {
+                if (isVoice) vm.removeVoice() else vm.removeMusic()
+            }
         }
         Spacer(Modifier.height(8.dp))
         SliderRow("VOLUME", cfg.volume, 0f, 1f) { v ->
@@ -479,7 +587,7 @@ fun RenameDialog(vm: AppViewModel) {
                 .fillMaxWidth()
                 .padding(horizontal = 24.dp)
                 .clip(RoundedCornerShape(20.dp))
-                .background(AeCard)
+                .background(AeSurface)
                 .clickable { }
                 .padding(20.dp)
         ) {
@@ -489,7 +597,7 @@ fun RenameDialog(vm: AppViewModel) {
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(12.dp))
-                    .background(AeCharcoal)
+                    .background(AeSurface2)
                     .padding(horizontal = 12.dp, vertical = 4.dp)
             ) {
                 BasicTextField(
@@ -532,7 +640,7 @@ fun ClipMenuDialog(vm: AppViewModel, index: Int) {
                 .fillMaxWidth()
                 .padding(horizontal = 24.dp)
                 .clip(RoundedCornerShape(20.dp))
-                .background(AeCard)
+                .background(AeSurface)
                 .clickable { }
                 .padding(20.dp)
         ) {
@@ -542,32 +650,42 @@ fun ClipMenuDialog(vm: AppViewModel, index: Int) {
                 color = AeText
             )
             Spacer(Modifier.height(14.dp))
-            MenuRow("\u2039 MOVE LEFT") { vm.moveClip(index, -1) }
+            MenuRow("MOVE LEFT", icon = AeIcon.Kind.BACK) { vm.moveClip(index, -1) }
             Spacer(Modifier.height(6.dp))
-            MenuRow("MOVE RIGHT \u203A") { vm.moveClip(index, +1) }
+            MenuRow("MOVE RIGHT", icon = AeIcon.Kind.CHEVRON_RIGHT) { vm.moveClip(index, +1) }
             Spacer(Modifier.height(6.dp))
-            MenuRow("CUSTOM ZOOM (start \u2192 end %%)") {
+            MenuRow("CUSTOM ZOOM (start to end %)") {
                 vm.setSheet(showClipMenu = null, showZoomEditor = index)
             }
             Spacer(Modifier.height(6.dp))
             MenuRow("CLEAR CUSTOM ZOOM") { vm.clearClipZoom(index) }
             Spacer(Modifier.height(6.dp))
-            MenuRow("\u2715 REMOVE IMAGE") { vm.removeClip(index) }
+            MenuRow("REMOVE IMAGE", icon = AeIcon.Kind.TRASH, danger = true) { vm.removeClip(index) }
         }
     }
 }
 
 @Composable
-private fun MenuRow(text: String, onClick: () -> Unit) {
-    Box(
+private fun MenuRow(
+    text: String,
+    icon: AeIcon.Kind? = null,
+    danger: Boolean = false,
+    onClick: () -> Unit
+) {
+    Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .background(AeCharcoal)
+            .background(AeSurface2)
             .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 12.dp)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(text, style = MaterialTheme.typography.bodyMedium, color = AeText)
+        if (icon != null) {
+            AeIcon(icon, size = 18.dp, tint = if (danger) AeDanger else AeTextDim)
+            Spacer(Modifier.width(10.dp))
+        }
+        Text(text, style = MaterialTheme.typography.bodyMedium, color = if (danger) AeDanger else AeText)
     }
 }
 
@@ -611,7 +729,7 @@ fun ZoomEditorDialog(vm: AppViewModel, index: Int) {
                 .fillMaxWidth()
                 .padding(horizontal = 20.dp)
                 .clip(RoundedCornerShape(20.dp))
-                .background(AeCard)
+                .background(AeSurface)
                 .clickable { }
                 .padding(20.dp)
         ) {
@@ -715,7 +833,7 @@ fun JunctionPickerDialog(vm: AppViewModel, junction: Int) {
                 .fillMaxWidth()
                 .padding(horizontal = 20.dp)
                 .clip(RoundedCornerShape(20.dp))
-                .background(AeCard)
+                .background(AeSurface)
                 .clickable { }
                 .padding(20.dp)
         ) {
@@ -748,7 +866,7 @@ fun JunctionPickerDialog(vm: AppViewModel, junction: Int) {
                             color = if (isCurrent) AeGold else AeText,
                             modifier = Modifier.weight(1f)
                         )
-                        if (isCurrent) Text("\u2713", color = AeGold, style = MaterialTheme.typography.labelLarge)
+                        if (isCurrent) AeIcon(AeIcon.Kind.CHECK, size = 16.dp, tint = AeGold)
                     }
                 }
             }
@@ -781,7 +899,7 @@ fun VideoTrimDialog(vm: AppViewModel) {
                 .fillMaxWidth()
                 .padding(horizontal = 20.dp)
                 .clip(RoundedCornerShape(20.dp))
-                .background(AeCard)
+                .background(AeSurface)
                 .clickable { }
                 .padding(20.dp)
         ) {

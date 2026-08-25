@@ -5,7 +5,15 @@ import android.graphics.Color
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedContentTransitionScope
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -24,6 +32,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -65,17 +74,30 @@ fun AppRoot() {
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(AeBlack),
+            .background(AeBg),
         contentAlignment = Alignment.Center
     ) {
         if (!bootstrapped) {
             SplashScreen()
         } else {
-            when {
-                ui.showStorage -> StorageScreen(vm)
-                ui.screen == AppViewModel.Screen.Editor && ui.projectId != null -> EditorScreen(vm)
-                else -> HomeScreen(vm)
+            // AnimatedContent guarantees the previous screen is removed before the
+            // next one is shown (short cross-fade), so no stale Composable/canvas
+            // content can "bleed through" during fast navigation.
+            val target: @Composable () -> Unit = when {
+                ui.showStorage -> @Composable { StorageScreen(vm) }
+                ui.screen == AppViewModel.Screen.Editor && ui.projectId != null ->
+                    @Composable { EditorScreen(vm) }
+                else -> @Composable { HomeScreen(vm) }
             }
+            AnimatedContent(
+                targetState = target,
+                transitionSpec = {
+                    (fadeIn(animationSpec = tween(220)) +
+                        slideInHorizontally(tween(220)) { it / 16 }) togetherWith
+                        fadeOut(animationSpec = tween(140))
+                },
+                label = "screen"
+            ) { content -> content() }
             ToastBar(ui.toast, ui.toastAt, vm::dismissToast)
         }
     }
@@ -108,18 +130,21 @@ fun ToastBar(message: String?, toastAt: Long, onDismiss: () -> Unit) {
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .padding(bottom = 32.dp),
+            .padding(bottom = 32.dp, start = 24.dp, end = 24.dp),
         contentAlignment = Alignment.BottomCenter
     ) {
         Box(
             modifier = Modifier
-                .background(
-                    AeCardHi,
-                    shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp)
-                )
-                .padding(horizontal = 20.dp, vertical = 12.dp)
+                .clip(RoundedCornerShape(18.dp))
+                .background(AeSurface3)
+                .border(1.dp, AeLine.copy(alpha = 0.6f), RoundedCornerShape(18.dp))
+                .padding(horizontal = 18.dp, vertical = 12.dp)
         ) {
-            Text(text = message, style = MaterialTheme.typography.bodyMedium, color = AeText)
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodyMedium,
+                color = AeText
+            )
         }
     }
 }
