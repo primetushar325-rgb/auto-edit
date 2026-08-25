@@ -44,10 +44,15 @@ import kotlin.math.roundToLong
  *
  * Images are each one [EditedMediaItem] in an [EditedMediaItemSequence] with
  * an explicit image duration; the whole sequence becomes one [Composition].
- * Each image gets a gentle Ken Burns zoom (100% -> 104% or reverse) via
- * [ScaleAndRotateTransformation] - the "basic zoom/Ken Burns" motion scope -
- * and is letterboxed (no stretch/corner crop) to the exact output frame with
- * [Presentation.LAYOUT_SCALE_TO_FIT].
+ * Images are letterboxed (no stretch/corner crop) to the exact output frame
+ * with [Presentation.LAYOUT_SCALE_TO_FIT]. No zoom/matrix effect is applied
+ * (see the note in buildEditedItem) because NDC clipping can leave artifacts.
+ *
+ * IMPORTANT: this exporter renders entirely OFF-SCREEN. Transformer creates
+ * the encoder input Surface internally (codec.createInputSurface()); that
+ * Surface is never attached to any View/SurfaceView/TextureView, and the code
+ * never uses PixelCopy/MediaProjection/View.draw. The encoded video can only
+ * contain decoded images/frames - never the app's UI.
  *
  * Transformer must be created + started + polled on a thread with a live
  * [Looper]; we use the main thread and expose a coroutine-friendly [export].
