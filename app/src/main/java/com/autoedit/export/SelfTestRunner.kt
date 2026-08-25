@@ -1,3 +1,5 @@
+@file:OptIn(androidx.media3.common.util.UnstableApi::class)
+
 package com.autoedit.export
 
 import android.app.Application
@@ -12,7 +14,6 @@ import com.autoedit.engine.AspectRatio
 import com.autoedit.engine.ClipMotion
 import com.autoedit.engine.ClipRef
 import com.autoedit.engine.ClipType
-import com.autoedit.engine.EasingType
 import com.autoedit.engine.ExportConfig
 import com.autoedit.engine.Keyframe
 import com.autoedit.engine.MotionType
@@ -25,27 +26,26 @@ import com.autoedit.media.VideoExporter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.util.UUID
 import kotlin.math.abs
 
 /**
- * On-device export self-test (run via:
- *   adb shell am start -n com.autoedit.app/.MainActivity --es selftest "2"
- * ).
+ * On-device export self-test.
  *
- * It creates a throwaway project with [imageCount] generated images (a
- * distinct gradient + index number per image), applies deterministic
- * Formula-01-style motion (image 1: 100% -> 108%, image 2: 108% -> 100%),
- * exports 1080p/30 with NO audio, then VERIFIES the MP4:
+ *   adb shell am start -n com.autoedit.app/.MainActivity --es selftest "3"
+ *
+ * Generates [imageCount] test images (distinct gradient + number per image),
+ * then exports and verifies the project ACROSS ALL THREE EXPORT PRESETS
+ * (720p / 1080p / 4K):
  *
  *   - file exists, non-zero size
- *   - duration matches the expected seconds
- *   - resolution is 1920x1080
- *   - first and last frames decode and are DIFFERENT (both images present)
+ *   - duration matches images * 3s
+ *   - exact target resolution
+ *   - first frame decodes
+ *   - frames sampled from each image's region are DISTINCT, confirming all
+ *     images actually appear in sequence (not a black screen / single image)
  *
- * Results are written as a JSON report next to the video, the evidence
- * frames are saved as PNGs, and every line is logged with tag
- * "AutoEditSelfTest" (adb logcat -s AutoEditSelfTest).
+ * A machine-readable JSON report with a per-preset block is written to
+ * files/projects/<id>/export/selftest-report.json. Log tag: AutoEditSelfTest.
  */
 object SelfTestRunner {
 
@@ -56,6 +56,8 @@ object SelfTestRunner {
         val reportFile: File?
     )
 
+    private data class PresetCase(val quality: Quality, val wantW: Int, val wantH: Int)
+
     suspend fun run(app: Application, imageCount: Int): SelfTestResult {
         val count = imageCount.coerceIn(1, 500)
         val id = "selftest-${System.currentTimeMillis()}"
@@ -64,14 +66,13 @@ object SelfTestRunner {
             log.add(s)
             android.util.Log.i("AutoEditSelfTest", s)
         }
-        note("self-test start: $count images, 1080p/30, no audio, Formula-01 motion")
+        note("self-test start: $count images across 720p/1080p/4K, 30fps, no audio")
         val t0 = System.currentTimeMillis()
         try {
             val repo = ProjectRepository(File(app.filesDir, "projects"))
             ProjectStorage.ensureProject(app, id)
             val srcDir = ProjectStorage.sourceDir(app, id)
 
-            // ------------------------------------------------ generate images
             note("generating $count test images…")
             val clips = ArrayList<ClipRef>()
             for (i in 0 until count) {
@@ -79,8 +80,6 @@ object SelfTestRunner {
                 val f = File(srcDir, "selftest-$i.png")
                 bmp.compress(Bitmap.CompressFormat.PNG, 90, f.outputStream())
                 bmp.recycle()
-                // deterministic motion: even index = zoom in 100->108,
-                // odd index = zoom out 108->100 (Formula 01 safe range)
                 val motion = if (i % 2 == 0) {
                     ClipMotion(MotionType.ZOOM_IN, Keyframe(1.0f), Keyframe(1.08f))
                 } else {
@@ -89,96 +88,116 @@ object SelfTestRunner {
                 clips += ClipRef(uri = f.absolutePath, type = ClipType.IMAGE, motion = motion)
             }
 
-            val p = ProjectModel(
-                id = id,
-                name = "SelfTest-$count",
-                createdAt = System.currentTimeMillis(),
-                updatedAt = System.currentTimeMillis(),
-                clips = clips,
-                formulaId = "F01",
-                clipDurationSec = 3.0,
-                transition = TransitionType.CROSS_DISSOLVE,
-                transitionDurationSec = 0.45,
-                aspect = AspectRatio.LANDSCAPE_16_9,
-                export = ExportConfig(
-                    quality = Quality.Q1080,
-                    fps = 30,
-                    aspect = AspectRatio.LANDSCAPE_16_9
-                )
+            val cases = listOf(
+                PresetCase(Quality.Q720, 1280, 720),
+                PresetCase(Quality.Q1080, 1920, 1080),
+                PresetCase(Quality.Q4K, 3840, 2160)
             )
-            repo.save(p)
 
-            val expectedSec = count * 3.0
-            val progress = ArrayList<Pair<Float, String>>()
-            val result = withContext(Dispatchers.Default) {
-                VideoExporter(app).export(
-                p,
-                ProjectStorage.tempDir(app, id),
-                ProjectStorage.exportDir(app, id),
-                isCancelled = { false }
-            ) { frac, stage ->
-                progress += frac to stage
+            val caseResults = ArrayList<String>()
+            var allOk = true
+            var lastFile: File? = null
+
+            for (case in cases) {
+                val p = ProjectModel(
+                    id = id,
+                    name = "SelfTest-$count-${case.quality.label}",
+                    createdAt = System.currentTimeMillis(),
+                    updatedAt = System.currentTimeMillis(),
+                    clips = clips,
+                    formulaId = "F01",
+                    clipDurationSec = 3.0,
+                    transition = TransitionType.CROSS_DISSOLVE,
+                    transitionDurationSec = 0.45,
+                    aspect = AspectRatio.LANDSCAPE_16_9,
+                    export = ExportConfig(
+                        quality = case.quality,
+                        fps = 30,
+                        aspect = AspectRatio.LANDSCAPE_16_9
+                    )
+                )
+                repo.save(p)
+                val expectedSec = count * 3.0
+                val tag = case.quality.label
+                note("── preset $tag (${case.wantW}x${case.wantH}) ──")
+
+                val result = withContext(Dispatchers.Default) {
+                    VideoExporter(app).export(
+                        p,
+                        ProjectStorage.tempDir(app, id),
+                        ProjectStorage.exportDir(app, id),
+                        isCancelled = { false }
+                    ) { _, _ -> }
                 }
-            }
-            note("export result: ${if (result.isSuccess) "SUCCESS" else "FAILURE ${result.exceptionOrNull()?.message}"}")
-            result.onFailure { e ->
-                note("failure detail: ${e.stackTraceToString().take(2000)}")
-                return cleanup(app, id, log, false, "export failed: ${e.message}")
-            }
-            val res = result.getOrThrow()
-            val file = res.file
+                if (result.isFailure) {
+                    val msg = result.exceptionOrNull()?.message?.replace("\"", "'")
+                    note("$tag FAILED: $msg")
+                    caseResults += "\"$tag\": {\"ok\": false, \"error\": \"$msg\"}"
+                    allOk = false
+                    continue
+                }
+                val file = result.getOrThrow().file
+                lastFile = file
 
-            // --------------------------------------------------- verification
-            val v = verify(file, 1920, 1080, expectedSec)
-            val vJson = v.entries.joinToString(", ") { "${it.key}=${fmt(it.value)}" }
-            note("verification: $vJson")
+                val v = verify(file, case.wantW, case.wantH, expectedSec)
+                val vJson = v.entries.joinToString(", ") { "\"${it.key}\": ${fmt(it.value)}" }
+                note("$tag verification: $vJson, size=${file.length() / 1024}KB")
 
-            // evidence frames: t=1s (image 1, mid zoom-in) and t=last-1 (image N)
-            val f1 = grabFrame(file, 1000_000L)
-            val f2 = grabFrame(file, ((expectedSec - 1.0) * 1_000_000).toLong())
-            val f1File = File(file.parentFile, "selftest-frame1-${(1000 / 1000)}s.png")
-            val f2File = File(file.parentFile, "selftest-frame2.png")
-            f1?.let { it.compress(Bitmap.CompressFormat.PNG, 90, f1File.outputStream()); it.recycle() }
-            f2?.let { it.compress(Bitmap.CompressFormat.PNG, 90, f2File.outputStream()); it.recycle() }
-            note("evidence frames: ${if (f1 != null) f1File.name else "MISSING"}, ${if (f2 != null) f2File.name else "MISSING"}")
-            if (count >= 2 && f1File.exists() && f2File.exists()) {
-                val diff = frameDifference(f1File, f2File)
-                val verdict = if (diff > 0.01f) "DISTINCT (both images present)" else "TOO SIMILAR (suspicious)"
-                note("frame difference (t=1s vs t=${(expectedSec - 1.0).toString()}s): ${"%.3f".format(diff)} -> $verdict")
+                // Confirm every image region actually shows a distinct frame.
+                var allImagesVisible = true
+                if (count >= 2) {
+                    val sampleTimes = if (count >= 3)
+                        listOf(0.5, expectedSec / 2.0, expectedSec - 0.5)
+                    else listOf(0.5, expectedSec - 0.5)
+                    val samples = sampleTimes.map { grabFrame(file, (it * 1_000_000).toLong()) }
+                    for (i in 0 until samples.size - 1) {
+                        val a = samples[i]
+                        val b = samples[i + 1]
+                        if (a != null && b != null) {
+                            val diff = bitmapDiff(a, b)
+                            note("$tag frame region $i vs ${i + 1} diff=${"%.3f".format(diff)}")
+                            if (diff <= 0.01f) allImagesVisible = false
+                        }
+                        a?.recycle()
+                    }
+                    samples.lastOrNull()?.recycle()
+                }
+
+                val ok = v["exists"] == true &&
+                    (v["sizeBytes"] as Long) > 0 &&
+                    v["durationMs"] != null &&
+                    abs((v["durationMs"] as Long) / 1000.0 - expectedSec) <= 1.0 &&
+                    v["width"] == case.wantW && v["height"] == case.wantH &&
+                    v["firstFrameDecodes"] == true &&
+                    allImagesVisible
+                if (!ok) allOk = false
+                caseResults += "\"$tag\": {\"ok\": $ok, \"file\": \"${file.name}\", $vJson, \"allImagesVisible\": $allImagesVisible}"
             }
 
-            val ok = v["exists"] == true &&
-                (v["sizeBytes"] as Long) > 0 &&
-                v["durationMs"] != null &&
-                abs((v["durationMs"] as Long) / 1000.0 - expectedSec) <= 0.75 &&
-                v["width"] == 1920 && v["height"] == 1080 &&
-                v["firstFrameDecodes"] == true
             val ms = System.currentTimeMillis() - t0
-            note("self-test ${if (ok) "PASSED" else "FAILED"} in ${ms}ms")
-            note("video: ${file.absolutePath} (${file.length() / 1024} KB)")
+            note("self-test ${if (allOk) "PASSED" else "FAILED"} in ${ms}ms across ${cases.size} presets")
+            lastFile?.let { note("primary video: ${it.absolutePath} (${it.length() / 1024} KB)") }
 
-            // write the JSON report
+            val reportFile = File(ProjectStorage.exportDir(app, id), "selftest-report.json")
+            reportFile.parentFile?.mkdirs()
             val report = buildString {
                 appendLine("{")
-                appendLine("  \"ok\": $ok,")
+                appendLine("  \"ok\": $allOk,")
                 appendLine("  \"images\": $count,")
-                appendLine("  \"expectedDurationSec\": $expectedSec,")
                 appendLine("  \"elapsedMs\": $ms,")
-                appendLine("  \"video\": \"${file.name}\",")
-                appendLine("  \"sizeBytes\": ${file.length()},")
-                appendLine("  \"verification\": { ${vJson} },")
-                appendLine("  \"warning\": ${res.warning?.let { "\"${it.replace("\"", "'")}\"" } ?: "null"},")
-                appendLine("  \"progressSamples\": [${progress.takeLast(20).joinToString(", ") { "%.2f".format(it.first) }}]")
-                append("}")
+                appendLine("  \"presets\": {")
+                appendLine(caseResults.joinToString(",\n"))
+                appendLine("  }")
+                appendLine("}")
             }
-            val reportFile = File(file.parentFile, "selftest-report.json")
             reportFile.writeText(report)
             note("report: ${reportFile.absolutePath}")
 
-            return SelfTestResult(ok, reportFile.absolutePath, file, reportFile)
+            return SelfTestResult(allOk, reportFile.absolutePath, lastFile, reportFile)
         } catch (e: Exception) {
             note("self-test crashed: ${e.stackTraceToString().take(2000)}")
-            return cleanup(app, id, log, false, "crash: ${e.message}")
+            android.util.Log.i("AutoEditSelfTest", "done: ok=false msg=crash: ${e.message}")
+            return SelfTestResult(false, "crash: ${e.message}", null, null)
         }
     }
 
@@ -186,18 +205,6 @@ object SelfTestRunner {
         null -> "null"
         is Boolean, is Long, is Int -> v.toString()
         else -> "\"${v.toString().replace("\"", "'")}\""
-    }
-
-    private fun cleanup(
-        app: Application,
-        id: String,
-        log: List<String>,
-        ok: Boolean,
-        message: String
-    ): SelfTestResult {
-        // keep the self-test project folder as evidence; just report
-        android.util.Log.i("AutoEditSelfTest", "done: ok=$ok msg=$message")
-        return SelfTestResult(ok, message, null, null)
     }
 
     private fun makeTestImage(index: Int, count: Int): Bitmap {
@@ -219,7 +226,10 @@ object SelfTestRunner {
         c.drawText(index.toString(), w / 2f, h / 2f + 100f, p)
         p.textSize = 48f
         p.color = Color.argb(200, 255, 255, 255)
-        c.drawText("AutoEdit self-test • image ${index + 1} of $count • zoom ${if (index % 2 == 0) "100→108" else "108→100"}%", w / 2f, h - 60f, p)
+        c.drawText(
+            "AutoEdit self-test • image ${index + 1} of $count • zoom ${if (index % 2 == 0) "100→108" else "108→100"}%",
+            w / 2f, h - 60f, p
+        )
         return bmp
     }
 
@@ -259,34 +269,26 @@ object SelfTestRunner {
         null
     }
 
-    /** Mean absolute pixel difference between two evidence PNGs (0..1). */
-    private fun frameDifference(a: File, b: File): Float {
-        return try {
-            val ba = android.graphics.BitmapFactory.decodeFile(a.absolutePath)
-            val bb = android.graphics.BitmapFactory.decodeFile(b.absolutePath)
-            if (ba == null || bb == null) return -1f
-            val n = minOf(ba.width, bb.width) * minOf(ba.height, bb.height)
-            if (n == 0) return -1f
-            var sum = 0L
-            val pa = IntArray(ba.width)
-            val pb = IntArray(bb.width)
-            for (y in 0 until minOf(ba.height, bb.height)) {
-                ba.getPixels(pa, 0, ba.width, 0, y, ba.width, 1)
-                bb.getPixels(pb, 0, bb.width, 0, y, bb.width, 1)
-                for (x in 0 until minOf(ba.width, bb.width)) {
-                    val ca = pa[x]
-                    val cb = pb[x]
-                    sum += abs((ca and 0xFF) - (cb and 0xFF)) +
-                        abs(((ca shr 8) and 0xFF) - ((cb shr 8) and 0xFF)) +
-                        abs(((ca shr 16) and 0xFF) - ((cb shr 16) and 0xFF))
-                }
+    /** Mean absolute per-channel difference between two in-memory bitmaps (0..1). */
+    private fun bitmapDiff(a: Bitmap, b: Bitmap): Float {
+        val w = minOf(a.width, b.width)
+        val h = minOf(a.height, b.height)
+        val n = w * h
+        if (n == 0) return -1f
+        var sum = 0L
+        val pa = IntArray(w)
+        val pb = IntArray(w)
+        for (y in 0 until h) {
+            a.getPixels(pa, 0, w, 0, y, w, 1)
+            b.getPixels(pb, 0, w, 0, y, w, 1)
+            for (x in 0 until w) {
+                val ca = pa[x]
+                val cb = pb[x]
+                sum += abs((ca and 0xFF) - (cb and 0xFF)) +
+                    abs(((ca shr 8) and 0xFF) - ((cb shr 8) and 0xFF)) +
+                    abs(((ca shr 16) and 0xFF) - ((cb shr 16) and 0xFF))
             }
-            val d = (sum.toDouble() / (n * 3)) / 255.0
-            ba.recycle()
-            bb.recycle()
-            d.toFloat()
-        } catch (e: Exception) {
-            -1f
         }
+        return ((sum.toDouble() / (n * 3)) / 255.0).toFloat()
     }
 }

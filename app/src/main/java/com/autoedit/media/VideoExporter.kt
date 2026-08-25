@@ -20,10 +20,13 @@ import com.autoedit.engine.EasingType
 import com.autoedit.engine.FormulaCatalog
 import com.autoedit.engine.ProjectModel
 import com.autoedit.engine.TimelineMath
+import androidx.media3.common.util.UnstableApi
 import com.autoedit.export.AacEncoder
 import com.autoedit.export.EncoderCapabilities
 import com.autoedit.export.ExportProgress
 import com.autoedit.export.GpuFrameRenderer
+import com.autoedit.export.Media3ExportPresets
+import com.autoedit.export.Media3VideoExporter
 import com.autoedit.export.SurfaceEncoder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -56,6 +59,7 @@ import kotlin.math.abs
  * queueInputBuffer) has been REMOVED: there is no video YUV path, no
  * per-frame getPixels, and no getInputImage anywhere in this file.
  */
+@UnstableApi
 class VideoExporter(private val ctx: Context) {
 
     class ExportCancelled : Exception("cancelled")
@@ -112,11 +116,22 @@ class VideoExporter(private val ctx: Context) {
             // ----------------------------------------------------------------
             onProgress(ExportProgress.prep(0.2f), "Preparing…")
             val a = p.aspect
-            val resolved = EncoderCapabilities.resolve(p.export.quality, a.w, a.h, p.export.fps)
-            if (resolved.fallback != null) warning = resolved.fallback
-            val w = resolved.width
-            val h = resolved.height
-            val fps = resolved.fps
+            // Resolve the Media3 preset first (primary pipeline). The hardware
+            // capability probe below is a SOFT hint used to downscale for the
+            // legacy GPU fallback and oddball encoders; Media3's own
+            // DefaultEncoderFactory negotiates hardware -> software fallback,
+            // so we never hard-fail here when no hardware encoder exists.
+            val preset = Media3ExportPresets.resolve(p.export.quality, a, p.export.fps)
+            val resolved = try {
+                EncoderCapabilities.resolve(p.export.quality, a.w, a.h, p.export.fps)
+            } catch (e: Exception) {
+                Log.w(TAG, "hardware encoder probe failed - relying on Media3 fallback: ${e.message}")
+                null
+            }
+            val w = resolved?.width ?: preset.width
+            val h = resolved?.height ?: preset.height
+            val fps = resolved?.fps ?: preset.fps
+            if (resolved?.fallback != null) warning = resolved.fallback
             val frames = (total * fps).toInt().coerceAtLeast(1)
             val expectedSec = frames / fps.toDouble()
             val easing = FormulaCatalog.byId(p.formulaId)?.easing ?: EasingType.EASE_IN_OUT
@@ -146,33 +161,59 @@ class VideoExporter(private val ctx: Context) {
             finalFile = File(exportDir, "Auto Edit - $safeName - $stamp.mp4")
 
             // ----------------------------------------------------------------
-            // STAGE 2 (5-85%): GPU render -> hardware H.264 -> temp video MP4
+            // STAGE 2 (5-85%): Media3 Transformer renders images -> temp video
+            // Primary path uses androidx.media3.transformer (handles codec
+            // lifecycle + hardware/software fallback internally). If Media3 is
+            // unavailable/fails on a device, the legacy GPU/Surface pipeline is
+            // used as an emergency fallback so export still completes.
             // ----------------------------------------------------------------
             onProgress(ExportProgress.render(0f), "Rendering frames 0/$frames")
+            var media3Warning: String? = null
             try {
-                renderVideo(p, w, h, fps, frames, videoTemp, easing, isCancelled) { frac ->
-                    val n = (frac * frames).toInt().coerceIn(0, frames)
-                    onProgress(
-                        ExportProgress.render(frac),
-                        if (frames > 200) "Rendering frames $n/$frames" else "Rendering frames $n/$frames"
-                    )
+                withContext(Dispatchers.Main) {
+                    Media3VideoExporter(ctx).export(
+                        project = p,
+                        preset = preset,
+                        outFile = videoTemp,
+                        isCancelled = isCancelled
+                    ) { frac, label ->
+                        // map Transformer's 0..1 onto the render band
+                        onProgress(ExportProgress.render(frac), label)
+                    }
+                }.also { r ->
+                    if (r.usedSoftwareEncoder) media3Warning = r.warning
+                    Log.i(TAG, "media3 video stage done: ${videoTemp.length() / 1024} KB (software=${r.usedSoftwareEncoder})")
                 }
-            } catch (e: SurfaceEncoder.EncoderStuckException) {
-                throw ExportException("video encode", e.message ?: "Video encoder stopped responding.", e)
-            } catch (e: GpuFrameRenderer.GpuException) {
-                throw ExportException(
-                    "video encode",
-                    "GPU rendering failed on this device: ${rootMsg(e)}. Please try again.", e
-                )
-            } catch (e: ExportCancelled) {
-                throw e
+            } catch (e: Media3VideoExporter.ExportCancelledException) {
+                throw ExportCancelled()
             } catch (e: Exception) {
-                throw ExportException("video encode", "Video rendering failed: ${rootMsg(e)}", e)
+                Log.e(TAG, "Media3 export failed - falling back to legacy GPU pipeline: ${rootMsg(e)}", e)
+                media3Warning = "Using compatibility renderer (${rootMsg(e).take(80)})"
+                if (videoTemp.exists()) videoTemp.delete()
+                try {
+                    renderVideo(p, w, h, fps, frames, videoTemp, easing, isCancelled) { frac ->
+                        val n = (frac * frames).toInt().coerceIn(0, frames)
+                        onProgress(ExportProgress.render(frac), "Rendering frames $n/$frames")
+                    }
+                } catch (le: SurfaceEncoder.EncoderStuckException) {
+                    throw ExportException("video encode", le.message ?: "Video encoder stopped responding.", le)
+                } catch (le: GpuFrameRenderer.GpuException) {
+                    throw ExportException(
+                        "video encode",
+                        "GPU rendering failed on this device: ${rootMsg(le)}. Please try again.", le
+                    )
+                } catch (le: ExportCancelled) {
+                    throw le
+                } catch (le: Exception) {
+                    throw ExportException("video encode", "Video rendering failed: ${rootMsg(le)}", le)
+                }
+            }
+            if (media3Warning != null) {
+                warning = (warning?.plus(" • ") ?: "") + media3Warning!!
             }
             if (!videoTemp.exists() || videoTemp.length() == 0L) {
                 throw ExportException("video encode", "Encoder produced an empty video file.")
             }
-            Log.i(TAG, "video stage done: ${videoTemp.length() / 1024} KB temp MP4")
 
             // ----------------------------------------------------------------
             // STAGE 3 (85-92%): audio decode/mix/encode (skipped if none set)
@@ -211,7 +252,10 @@ class VideoExporter(private val ctx: Context) {
             } catch (e: Exception) {
                 throw ExportException("finalize", "Could not finalize the video: ${rootMsg(e)}", e)
             }
-            val verifyErr = verifyMp4(finalFile!!, w, h, expectedSec)
+            // Media3 encodes at the preset resolution (the primary path); use those
+            // exact dimensions for verification. The legacy fallback also targets
+            // w/h which the probe already matched to a supported encoder size.
+            val verifyErr = verifyMp4(finalFile!!, preset.width, preset.height, expectedSec)
             if (verifyErr != null) {
                 throw ExportException("finalize", "Exported file failed verification: $verifyErr")
             }

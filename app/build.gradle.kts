@@ -52,6 +52,18 @@ dependencies {
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+
+    // Media3 Transformer: image -> Composition -> H.264/AAC export. Replaces the
+    // hand-rolled MediaCodec/Surface/GPU pipeline for the main video render path;
+    // the old GpuFrameRenderer/SurfaceEncoder remain as an emergency fallback.
+    val media3Version = "1.4.1"
+    implementation("androidx.media3:media3-transformer:$media3Version")
+    implementation("androidx.media3:media3-effect:$media3Version")
+    implementation("androidx.media3:media3-common:$media3Version")
+    implementation("androidx.media3:media3-muxer:$media3Version")
+    // Guava ImmutableList is part of Media3's public API (EncoderSelector).
+    implementation("com.google.guava:guava:33.0.0-android")
+
     testImplementation("junit:junit:4.13.2")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
