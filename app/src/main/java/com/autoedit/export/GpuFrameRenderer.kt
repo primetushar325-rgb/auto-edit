@@ -157,6 +157,16 @@ class GpuFrameRenderer(
         videoFrame: (Int, Long) -> YuvFrame?
     ) {
         if (!initialized) throw GpuException("renderer not initialized")
+        // A black video frequently means draws happen on the wrong/un-current EGL
+        // context. Verify the context + surface are current before each draw.
+        if (EGL14.eglGetCurrentContext() != eglContext ||
+            EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW) != eglSurface
+        ) {
+            throw GpuException(
+                "EGL context/surface not current before frame " +
+                    "(ctx=${EGL14.eglGetCurrentContext()}, surf=${EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW)})"
+            )
+        }
         val clipDur = durations.getOrNull(state.clipIndex) ?: p.effectiveClipDuration()
         val prevDur = if (state.prevIndex >= 0) durations.getOrNull(state.prevIndex) ?: clipDur else clipDur
         val transition = p.junctionTransitions[state.clipIndex] ?: p.transition
@@ -258,7 +268,7 @@ class GpuFrameRenderer(
         val motion = clip.resolvedMotion()
         val tr = FrameMath.transformAt(motion, localT, clipDur, easing)
         val cover = maxOf(targetW.toFloat() / tw, targetH.toFloat() / th)
-        computeModel(targetW, targetH, cover, tr, 1f)
+        computeModel(targetW, targetH, tw, th, cover, tr, 1f)
 
         if (clip.type == ClipType.IMAGE) {
             val tex = preparedImageTex!!
@@ -339,19 +349,34 @@ class GpuFrameRenderer(
 
     /**
      * Column-major model matrix mapping the unit quad (-1..1) into a
-     * [targetW]x[targetH] frame. At scale 1.0 the image exactly covers the
-     * frame (center crop) - same math as the Compose preview.
+     * [targetW]x[targetH] frame.
+     *
+     * The unit quad already spans the full NDC range [-1,1], which the GL
+     * viewport maps to the full [targetW]x[targetH] frame. To "cover" the
+     * frame with an image of size [tw]x[th] (center-crop, matching the
+     * Compose preview), we scale the unit quad by
+     *
+     *   cover * tw/targetW   (x)   and   cover * th/targetH  (y)
+     *
+     * where cover = max(targetW/tw, targetH/th). The negative Y accounts
+     * for GL's bottom-up NDC vs. top-down image rows.
+     *
+     * (The previous code divided by targetW/2 in pixels, which shrank the
+     * quad to ~0.001x - a sub-pixel, invisible quad - producing a black
+     * export with working audio.)
      */
     private fun computeModel(
         targetW: Int,
         targetH: Int,
+        tw: Int,
+        th: Int,
         cover: Float,
         tr: MotionTransform,
         extraScale: Float
     ) {
         val m = cover * tr.scale * extraScale
-        val sx = m / (targetW / 2f)
-        val sy = -m / (targetH / 2f)
+        val sx = m * tw / targetW
+        val sy = -m * th / targetH
         val tx = tr.xFrac * 2f
         val ty = -tr.yFrac * 2f
         model[0] = sx; model[1] = 0f; model[2] = 0f; model[3] = 0f
@@ -412,6 +437,7 @@ class GpuFrameRenderer(
             return null
         }
         val entry = TexEntry(id, bmp.width, bmp.height)
+        Log.i(TAG, "clip texture decoded: $key -> ${bmp.width}x${bmp.height} (maxDim=$maxDim), GL tex=$id")
         synchronized(texCache) {
             texCache.remove(key)
             texCache[key] = entry

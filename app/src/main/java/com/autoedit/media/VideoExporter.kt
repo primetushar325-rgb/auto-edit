@@ -280,6 +280,7 @@ class VideoExporter(private val ctx: Context) {
         val renderer = GpuFrameRenderer(ctx, w, h, p.adjustments, easing)
         val videoDecoders = HashMap<Int, VideoFrameDecoder>()
         var rendererReady = false
+        var lastClipIndex = -1
         try {
             encoder.init()
             val surface = encoder.inputSurface
@@ -314,6 +315,17 @@ class VideoExporter(private val ctx: Context) {
                 renderer.swap() // blocks with natural backpressure when the encoder queue is full
                 encoder.noteFrameRendered()
                 encoder.drain(blocking = false)
+                if (i % 30 == 0 || i == frames - 1 || state.clipIndex != lastClipIndex) {
+                    Log.i(
+                        TAG,
+                        "frame $i/$frames rendered: clip=${state.clipIndex} " +
+                            "(prev=${state.prevIndex}, blend=${"%.2f".format(state.blend)}) " +
+                            "t=${"%.3f".format(t)}s ptsUs=${ptsNs / 1000L} swap=OK"
+                    )
+                    lastClipIndex = state.clipIndex
+                } else {
+                    Log.v(TAG, "frame $i: clip=${state.clipIndex} ptsUs=${ptsNs / 1000L} swap=OK")
+                }
                 if (i % 30 == 0 || i == frames - 1) onFrac((i + 1).toFloat() / frames)
             }
 
