@@ -50,6 +50,34 @@ object TimelineMath {
         )
     }
 
+    /**
+     * Variable per-clip duration version (mixed image/video timelines).
+     * Same transition semantics as the fixed-duration [frameAt].
+     */
+    fun frameAt(time: Double, clipDurations: List<Double>, transitionDurationSec: Double): FrameState {
+        val n = clipDurations.size
+        if (n == 0) return FrameState(0, 0.0, -1, 0.0)
+        val total = clipDurations.sumOf { it.coerceAtLeast(0.0) }
+        if (total <= 0.0) return FrameState(0, 0.0, -1, 0.0)
+        var t = time.coerceIn(0.0, (total - 1e-6).coerceAtLeast(0.0))
+        var idx = 0
+        while (idx < n - 1) {
+            val d = clipDurations[idx].coerceAtLeast(0.0)
+            if (t < d) break
+            t -= d
+            idx++
+        }
+        val local = t
+        val td = transitionDurationSec.coerceIn(0.0, clipDurations[idx].coerceAtLeast(0.0) * 0.9)
+        val inTrans = idx > 0 && td > 0 && local < td
+        return FrameState(
+            clipIndex = idx,
+            localT = local,
+            prevIndex = if (inTrans) idx - 1 else -1,
+            blend = if (inTrans) (local / td).coerceIn(0.0, 1.0) else 0.0
+        )
+    }
+
     fun easing(t: Double, type: EasingType): Double {
         val x = t.coerceIn(0.0, 1.0)
         return when (type) {

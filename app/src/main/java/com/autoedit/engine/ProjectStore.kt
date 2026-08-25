@@ -17,6 +17,15 @@ object ProjectJson {
         p.clips.forEachIndexed { i, c ->
             if (i > 0) sb.append(",")
             sb.append("{\"uri\":").append(str(c.uri))
+            if (c.type != ClipType.IMAGE) {
+                sb.append(",\"type\":").append(str(c.type.name))
+                sb.append(",\"vin\":").append(c.videoInMs)
+                sb.append(",\"vout\":").append(c.videoOutMs)
+            }
+            if (c.startZoom != null || c.endZoom != null) {
+                sb.append(",\"sz\":").append(num((c.startZoom ?: 1f).toDouble()))
+                sb.append(",\"ez\":").append(num((c.endZoom ?: ClipRef.DEFAULT_END_ZOOM).toDouble()))
+            }
             val m = c.motion
             if (m != null) {
                 sb.append(",\"motion\":{\"type\":").append(str(m.type.name))
@@ -50,6 +59,15 @@ object ProjectJson {
         sb.append("\"export\":{\"quality\":").append(str(e.quality.name))
             .append(",\"fps\":").append(e.fps)
             .append(",\"aspect\":").append(str(e.aspect.name)).append("}")
+        if (p.junctionTransitions.isNotEmpty()) {
+            sb.append(",\"junctions\":{")
+            sb.append(
+                p.junctionTransitions.entries.joinToString(",") { (k, v) ->
+                    "\"" + k + "\":\"" + v.name + "\""
+                }
+            )
+            sb.append("}")
+        }
         sb.append("}")
         return sb.toString()
     }
@@ -112,11 +130,25 @@ object ProjectJson {
                     )
                 )
             }
-            ClipRef(uri = cm["uri"] as String, motion = motion)
+            val cType = (cm["type"] as? String)?.let { runCatching { ClipType.valueOf(it) }.getOrNull() } ?: ClipType.IMAGE
+            val hasZoom = cm.containsKey("sz") || cm.containsKey("ez")
+            ClipRef(
+                uri = cm["uri"] as String,
+                type = cType,
+                motion = motion,
+                videoInMs = (cm["vin"] as? Number)?.toLong() ?: 0L,
+                videoOutMs = (cm["vout"] as? Number)?.toLong() ?: 0L,
+                startZoom = if (hasZoom) ((cm["sz"] as? Number)?.toFloat() ?: 1f) else null,
+                endZoom = if (hasZoom) ((cm["ez"] as? Number)?.toFloat() ?: ClipRef.DEFAULT_END_ZOOM) else null
+            )
         } ?: emptyList()
 
         val adj = (root["adjust"] as? Map<String, Any>) ?: emptyMap()
         val exp = (root["export"] as? Map<String, Any>) ?: emptyMap()
+        val junctions = (root["junctions"] as? Map<String, Any>)?.mapNotNull { (k, v) ->
+            val idx = k.toIntOrNull() ?: return@mapNotNull null
+            runCatching { TransitionType.valueOf(v.toString()) }.getOrNull()?.let { idx to it }
+        }?.toMap() ?: emptyMap()
 
         return ProjectModel(
             id = root["id"] as String,
@@ -145,7 +177,8 @@ object ProjectJson {
                 quality = Quality.valueOf((exp["quality"] as? String) ?: "Q1080"),
                 fps = (exp["fps"] as? Number)?.toInt() ?: 30,
                 aspect = AspectRatio.valueOf((exp["aspect"] as? String) ?: "LANDSCAPE_16_9")
-            )
+            ),
+            junctionTransitions = junctions
         )
     }
 

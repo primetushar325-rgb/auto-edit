@@ -25,11 +25,15 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -37,6 +41,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.autoedit.engine.AspectRatio
+import com.autoedit.engine.ClipRef
 import com.autoedit.engine.ExportConfig
 import com.autoedit.engine.Formula
 import com.autoedit.engine.FormulaCatalog
@@ -136,8 +141,17 @@ fun FormulaSheet(vm: AppViewModel) {
             style = MaterialTheme.typography.bodySmall,
             color = AeTextDim
         )
-        Spacer(Modifier.height(12.dp))
-        FormulaCatalog.all.forEach { f ->
+        Spacer(Modifier.height(10.dp))
+        Text("FORMULAS", style = MaterialTheme.typography.labelLarge, color = AeGold)
+        Spacer(Modifier.height(8.dp))
+        FormulaCatalog.formulas.forEach { f ->
+            FormulaCard(f, isActive = ui.formulaId == f.id) { vm.applyFormula(f.id) }
+            Spacer(Modifier.height(10.dp))
+        }
+        Spacer(Modifier.height(6.dp))
+        Text("2026 VIRAL TRENDING EFFECTS", style = MaterialTheme.typography.labelLarge, color = AeGold)
+        Spacer(Modifier.height(8.dp))
+        FormulaCatalog.trends.forEach { f ->
             FormulaCard(f, isActive = ui.formulaId == f.id) { vm.applyFormula(f.id) }
             Spacer(Modifier.height(10.dp))
         }
@@ -171,7 +185,7 @@ private fun FormulaCard(f: Formula, isActive: Boolean, onApply: () -> Unit) {
         Spacer(Modifier.height(10.dp))
         SpecRow("MOTION", if (f.motionMode == com.autoedit.engine.MotionMode.RANDOM) "Random" else "Fixed")
         SpecRow("ZOOM", f.zoomRangeLabel())
-        SpecRow("TRANSITION", "${f.transition.label()} \u2022 ${"%.2f".format(f.transitionDurationSec)}s")
+        SpecRow("TRANSITION", "${f.transition.label()} \u2022 ${"%.2f".format(f.transitionDurationSec)}s (suggested \u2013 your transition is kept)")
         SpecRow("DURATION", "${"%.0f".format(f.clipDurationSec)} sec / image")
         Spacer(Modifier.height(12.dp))
         GoldButton(text = "APPLY FORMULA", modifier = Modifier.fillMaxWidth(), onClick = onApply)
@@ -532,6 +546,12 @@ fun ClipMenuDialog(vm: AppViewModel, index: Int) {
             Spacer(Modifier.height(6.dp))
             MenuRow("MOVE RIGHT \u203A") { vm.moveClip(index, +1) }
             Spacer(Modifier.height(6.dp))
+            MenuRow("CUSTOM ZOOM (start \u2192 end %%)") {
+                vm.setSheet(showClipMenu = null, showZoomEditor = index)
+            }
+            Spacer(Modifier.height(6.dp))
+            MenuRow("CLEAR CUSTOM ZOOM") { vm.clearClipZoom(index) }
+            Spacer(Modifier.height(6.dp))
             MenuRow("\u2715 REMOVE IMAGE") { vm.removeClip(index) }
         }
     }
@@ -563,4 +583,243 @@ fun SwitchCompat(checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
             uncheckedTrackColor = AeCardHi
         )
     )
+}
+
+// ================================================================
+// Per-clip custom zoom editor (start -> end, apply-to-all)
+// ================================================================
+
+@Composable
+fun ZoomEditorDialog(vm: AppViewModel, index: Int) {
+    val ui by vm.ui.collectAsState()
+    val clip = vm.projectSnapshot()?.clips?.getOrNull(index)
+    val defStart = (clip?.startZoom ?: 1f) * 100f
+    val defEnd = (clip?.endZoom ?: ClipRef.DEFAULT_END_ZOOM) * 100f
+    var startPct by remember { mutableFloatStateOf(defStart) }
+    var endPct by remember { mutableFloatStateOf(defEnd) }
+    var applyAll by remember { mutableStateOf(false) }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.55f))
+            .clickable { vm.setSheet(showZoomEditor = null) },
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .clip(RoundedCornerShape(20.dp))
+                .background(AeCard)
+                .clickable { }
+                .padding(20.dp)
+        ) {
+            Text(
+                "CUSTOM ZOOM - IMAGE ${index + 1}",
+                style = MaterialTheme.typography.titleMedium,
+                color = AeText
+            )
+            Text(
+                "Default push: 100% to 92%. Range 80-130%.",
+                style = MaterialTheme.typography.bodySmall,
+                color = AeTextDim
+            )
+            Spacer(Modifier.height(12.dp))
+            ZoomSlider("START ZOOM", startPct) { startPct = it }
+            ZoomSlider("END ZOOM", endPct) { endPct = it }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "APPLY TO ALL CLIPS",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = AeTextDim,
+                    modifier = Modifier.weight(1f)
+                )
+                SwitchCompat(applyAll) { applyAll = it }
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Preview: ${"%.0f".format(startPct)}% \u2192 ${"%.0f".format(endPct)}%",
+                style = MaterialTheme.typography.labelLarge,
+                color = AeGold
+            )
+            Spacer(Modifier.height(14.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                SecondaryButton(
+                    text = "CANCEL",
+                    modifier = Modifier.weight(1f),
+                    onClick = { vm.setSheet(showZoomEditor = null) }
+                )
+                GoldButton(
+                    text = if (applyAll) "APPLY TO ALL" else "SAVE",
+                    modifier = Modifier.weight(1f),
+                    onClick = {
+                        vm.setClipZoom(index, startPct / 100f, endPct / 100f, applyAll)
+                    }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ZoomSlider(label: String, value: Float, onChange: (Float) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+        Text(label, style = MaterialTheme.typography.labelSmall, color = AeTextDim, modifier = Modifier.width(96.dp))
+        Slider(
+            value = value,
+            onValueChange = onChange,
+            valueRange = 80f..130f,
+            modifier = Modifier.weight(1f),
+            colors = SliderDefaults.colors(
+                thumbColor = AeGold,
+                activeTrackColor = AeGold,
+                inactiveTrackColor = AeCardHi
+            )
+        )
+        Text("${"%.0f".format(value)}%", style = MaterialTheme.typography.labelSmall, color = AeText, modifier = Modifier.width(44.dp))
+    }
+}
+
+// ================================================================
+// Junction transition picker (CapCut-style, per gap)
+// ================================================================
+
+@Composable
+fun JunctionPickerDialog(vm: AppViewModel, junction: Int) {
+    val p = vm.projectSnapshot()
+    val current = p?.junctionTransitions?.get(junction)
+    val options: List<Pair<String, TransitionType?>> = listOf(
+        "Project default" to null,
+        "Cut (none)" to TransitionType.NONE,
+        "Dissolve" to TransitionType.CROSS_DISSOLVE,
+        "Fade to black" to TransitionType.FADE,
+        "Slide left" to TransitionType.SLIDE_LEFT,
+        "Slide right" to TransitionType.SLIDE_RIGHT,
+        "Slide up" to TransitionType.SLIDE_UP,
+        "Slide down" to TransitionType.SLIDE_DOWN,
+        "Zoom" to TransitionType.ZOOM,
+        "Zoom blur" to TransitionType.BLUR,
+        "Glitch flash" to TransitionType.FLASH,
+        "Whip-pan" to TransitionType.SLIDE_LEFT
+    )
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.55f))
+            .clickable { vm.setSheet(showJunction = null) },
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .clip(RoundedCornerShape(20.dp))
+                .background(AeCard)
+                .clickable { }
+                .padding(20.dp)
+        ) {
+            Text(
+                "TRANSITION: GAP ${junction} \u2192 ${junction + 1}",
+                style = MaterialTheme.typography.titleMedium,
+                color = AeText
+            )
+            Text(
+                "Applies only to this junction. Default: ${p?.transition?.label() ?: "-"}",
+                style = MaterialTheme.typography.bodySmall,
+                color = AeTextDim
+            )
+            Spacer(Modifier.height(10.dp))
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                options.forEach { (label, t) ->
+                    val isCurrent = (t == null && current == null) ||
+                        (t != null && t == current)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (isCurrent) AeCardHi else AeCharcoal)
+                            .clickable { vm.setJunctionTransition(junction, t) }
+                            .padding(horizontal = 14.dp, vertical = 11.dp)
+                    ) {
+                        Text(
+                            label,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (isCurrent) AeGold else AeText,
+                            modifier = Modifier.weight(1f)
+                        )
+                        if (isCurrent) Text("\u2713", color = AeGold, style = MaterialTheme.typography.labelLarge)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ================================================================
+// Video trim + insert dialog
+// ================================================================
+
+@Composable
+fun VideoTrimDialog(vm: AppViewModel) {
+    val ui by vm.ui.collectAsState()
+    val pend = ui.pendingVideo ?: return
+    val dur = pend.second.toFloat()
+    var inSec by remember { mutableFloatStateOf(0f) }
+    var outSec by remember { mutableFloatStateOf(dur.coerceAtMost(10f)) }
+    var pos by remember { mutableIntStateOf(0) }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.55f))
+            .clickable { vm.cancelVideo() },
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .clip(RoundedCornerShape(20.dp))
+                .background(AeCard)
+                .clickable { }
+                .padding(20.dp)
+        ) {
+            Text("INSERT VIDEO CLIP", style = MaterialTheme.typography.titleMedium, color = AeText)
+            Text(
+                "Length ${vm.fmtTime(dur.toDouble())} - trim the segment you want.",
+                style = MaterialTheme.typography.bodySmall,
+                color = AeTextDim
+            )
+            Spacer(Modifier.height(12.dp))
+            ZoomSlider("TRIM IN (s)", inSec.coerceAtMost(outSec - 0.2f)) { v ->
+                inSec = v.coerceIn(0f, (outSec - 0.2f).coerceAtLeast(0f))
+            }
+            ZoomSlider("TRIM OUT (s)", outSec) { v ->
+                outSec = v.coerceIn((inSec + 0.2f).coerceAtMost(dur), dur)
+            }
+            ZoomSlider("INSERT AT (clip #)", pos.toFloat()) { v ->
+                pos = v.toInt().coerceIn(0, ui.clipCount)
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Segment: ${"%.1f".format((outSec - inSec).coerceAtLeast(0f))}s \u2022 position: after clip ${pos}",
+                style = MaterialTheme.typography.labelLarge,
+                color = AeGold
+            )
+            Spacer(Modifier.height(14.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                SecondaryButton(
+                    text = "CANCEL",
+                    modifier = Modifier.weight(1f),
+                    onClick = { vm.cancelVideo() }
+                )
+                GoldButton(
+                    text = "INSERT",
+                    modifier = Modifier.weight(1f),
+                    onClick = { vm.confirmAddVideo((inSec * 1000).toLong(), (outSec * 1000).toLong(), pos) }
+                )
+            }
+        }
+    }
 }

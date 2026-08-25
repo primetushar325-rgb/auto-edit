@@ -20,11 +20,14 @@ data class Formula(
     val transition: TransitionType,
     val transitionDurationSec: Double,
     val easing: EasingType,
+    val category: PresetCategory = PresetCategory.FORMULA,
     val enabled: Boolean = true
 ) {
     fun zoomRangeLabel(): String =
         "100\u2013${"%.0f".format(100 + zoomMax * 100)}% zoom"
 }
+
+enum class PresetCategory { FORMULA, TREND }
 
 object FormulaCatalog {
 
@@ -100,7 +103,104 @@ object FormulaCatalog {
         easing = EasingType.EASE_OUT
     )
 
-    val all: List<Formula> = listOf(F01, F02, F03, F04)
+    // ------------------------------------------------------------------
+    // 2026 VIRAL TRENDING EFFECTS - separate category, same engine.
+    // One-tap apply, exactly like formulas.
+    // ------------------------------------------------------------------
+
+    val T01 = Formula(
+        id = "T01",
+        name = "TREND 01",
+        tagline = "BEAT PUNCH",
+        description = "Every clip starts zoomed in and snaps back to 100% on the " +
+            "beat, with hard flash cuts. High energy, viral style.",
+        clipDurationSec = 2.5,
+        motionMode = MotionMode.FIXED,
+        motionPool = listOf(MotionType.PUNCH_ZOOM),
+        zoomMin = 0.05f,
+        zoomMax = 0.15f,
+        panMax = 0f,
+        transition = TransitionType.FLASH,
+        transitionDurationSec = 0.3,
+        easing = EasingType.EASE_OUT,
+        category = PresetCategory.TREND
+    )
+
+    val T02 = Formula(
+        id = "T02",
+        name = "TREND 02",
+        tagline = "GLITCH FLASH CUTS",
+        description = "Fast 2.2s cuts, punchy zoom-pan jumps and glitchy white " +
+            "flash between every clip.",
+        clipDurationSec = 2.2,
+        motionMode = MotionMode.RANDOM,
+        motionPool = listOf(MotionType.ZOOM_PAN, MotionType.PUNCH_ZOOM),
+        zoomMin = 0.08f,
+        zoomMax = 0.18f,
+        panMax = 0.06f,
+        transition = TransitionType.FLASH,
+        transitionDurationSec = 0.22,
+        easing = EasingType.EASE_OUT,
+        category = PresetCategory.TREND
+    )
+
+    val T03 = Formula(
+        id = "T03",
+        name = "TREND 03",
+        tagline = "SPEED-RAMP ZOOM",
+        description = "Accelerating 100% to 125% speed-ramp zoom on every clip " +
+            "with soft dissolves. Smooth and hypnotic.",
+        clipDurationSec = 3.0,
+        motionMode = MotionMode.FIXED,
+        motionPool = listOf(MotionType.RAMP_ZOOM),
+        zoomMin = 0.15f,
+        zoomMax = 0.25f,
+        panMax = 0f,
+        transition = TransitionType.CROSS_DISSOLVE,
+        transitionDurationSec = 0.4,
+        easing = EasingType.EASE_IN_OUT,
+        category = PresetCategory.TREND
+    )
+
+    val T04 = Formula(
+        id = "T04",
+        name = "TREND 04",
+        tagline = "ON-BEAT SHAKE",
+        description = "Hard cuts with an alternating directional jolt on every " +
+            "clip, like the edit punched in on the beat.",
+        clipDurationSec = 2.0,
+        motionMode = MotionMode.FIXED,
+        motionPool = listOf(MotionType.SHAKE),
+        zoomMin = 0.0f,
+        zoomMax = 0.0f,
+        panMax = 0.045f,
+        transition = TransitionType.NONE,
+        transitionDurationSec = 0.0,
+        easing = EasingType.EASE_OUT,
+        category = PresetCategory.TREND
+    )
+
+    val T05 = Formula(
+        id = "T05",
+        name = "TREND 05",
+        tagline = "WHIP-PAN",
+        description = "Fast whip-pan swings that land on every new clip, glued " +
+            "together with quick slide transitions.",
+        clipDurationSec = 2.5,
+        motionMode = MotionMode.FIXED,
+        motionPool = listOf(MotionType.WHIP_PAN),
+        zoomMin = 0.02f,
+        zoomMax = 0.05f,
+        panMax = 0.07f,
+        transition = TransitionType.SLIDE_LEFT,
+        transitionDurationSec = 0.25,
+        easing = EasingType.EASE_OUT,
+        category = PresetCategory.TREND
+    )
+
+    val formulas: List<Formula> = listOf(F01, F02, F03, F04)
+    val trends: List<Formula> = listOf(T01, T02, T03, T04, T05)
+    val all: List<Formula> = formulas + trends
 
     fun byId(id: String?): Formula? = all.firstOrNull { it.id == id }
 

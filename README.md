@@ -43,6 +43,11 @@ Built-in formulas (easy to extend — one data object each):
 ## Features
 
 - **Multi-image import** via the Android system Photo Picker (API 33+, max clamped to the device limit) with a Storage-Access-Fallback for API 26-32 (persistent URI grants), reorder, delete, re-add — zero permissions
+- **No auto-formula**: imported clips start STATIC; motion is applied only when you tap Apply Formula or set custom zoom
+- **Per-clip custom zoom**: start 100% -> end 92% push by default (user-editable 80-130%), with an "Apply to all clips" toggle
+- **Mixed image + video timelines**: insert a trimmed video segment (trim in/out) at any position; export renders real video frames
+- **Per-junction transitions (CapCut-style)**: tap the marker on any clip gap to set that junction's transition independently (cut, dissolve, slide, zoom-blur, glitch flash, whip-pan...)
+- **2026 Viral Trending Effects** (separate tab): beat punch, glitch flash cuts, speed-ramp zoom, on-beat shake, whip-pan — one-tap apply on the same engine
 - **Timeline** with thumbnails, image numbers, motion indicators, transition markers
 - **Preview player** with play / pause / restart / fullscreen — mirrors the export exactly
 - **10 transitions**: None, Fade, Cross Dissolve, Slide L/R/U/D, Zoom, Blur, Flash (0.45 s default, configurable)
@@ -100,3 +105,39 @@ save the exported video. No analytics, no tracking, no network calls.
   friendly message instead of crashing
 - Persistent read grants are taken where the picker supports them, so
   projects stay valid after restart
+
+### Export reliability (crash-proof)
+
+- **YUV fix**: the field crash `index=1036800 out of bounds (limit=1036799)`
+  was a chroma subsampling bug - U/V planes hold h/2 rows, the old writer
+  used full-luma row offsets and overflowed the 1080p U plane (1920x540 =
+  1,036,800 bytes) at exactly that index, on every frame of every project.
+  `YuvConverter` now handles planar (pixelStride=1) and semi-planar
+  (pixelStride=2) layouts, asserts plane capacities against the actual
+  resolution (clear error, never a silent crash) and clamps+logs any
+  out-of-bounds index as a safety net.
+- **Single-session mux**: one MediaMuxer writes both tracks (audio added
+  from the real encoded format, video streamed live, interleaved by PTS).
+  The separate video-remux step is gone.
+- Audio is trimmed/padded to the exact video sample count (Long math - no
+  Int overflow on long projects)
+- Per-frame render failures log the cause and substitute a black frame
+  instead of killing a long export
+- Every caught export error is logged with a full stack trace and shown to
+  the user with a specific, stage-specific message
+
+### Per-project storage
+
+```
+filesDir/projects/<project_id>/
+  source_images/   (images + inserted video clips, copied in)
+  audio/           (voice + music, copied in)
+  export/          (final .mp4 outputs)
+  temp/            (render temp - always cleaned after export, success or fail)
+  project.json
+```
+
+- Picker URIs are copied into the project, so expiring URI grants never
+  break a saved project
+- Home -> STORAGE shows total usage + per-project size + full delete
+- Startup auto-cleans orphaned temp files older than 24h

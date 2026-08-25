@@ -3,7 +3,6 @@ package com.autoedit.media
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.net.Uri
 import com.autoedit.engine.AspectRatio
 import com.autoedit.engine.FrameState
 import com.autoedit.engine.ProjectModel
@@ -44,13 +43,12 @@ class ClipImageCache(
     }
 
     private fun decodeFull(uriStr: String): Bitmap? = runCatching {
-        val u = Uri.parse(uriStr)
-        val size = ImageLoader.readSize(ctx, u) ?: return@runCatching null
+        val size = ImageLoader.readSize(ctx, uriStr) ?: return@runCatching null
         var sample = 1
         val longest = maxOf(size.first, size.second)
         while (longest / (sample * 2) >= maxDim) sample *= 2
         val opts = BitmapFactory.Options().apply { inSampleSize = sample }
-        ctx.contentResolver.openInputStream(u)?.use {
+        ProjectStorage.openInput(ctx, uriStr)?.use {
             BitmapFactory.decodeStream(it, null, opts)
         }
     }.getOrNull()

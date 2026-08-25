@@ -1,489 +1,534 @@
+// WrongConstant: MediaMuxer.OUTPUT_FORMAT_MPEG_4 (= 2) - the platform android.jar stub
+// omits the MediaMuxer OUTPUT_FORMAT_* constants, so the value is inlined.
+@file:Suppress("WrongConstant")
+
 package com.autoedit.media
 
 import android.content.ContentValues
 import android.content.Context
-import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.ImageFormat
-import android.media.Image
 import android.media.MediaCodec
-import android.media.MediaCodecInfo
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import android.media.MediaMetadataRetriever
 import android.media.MediaMuxer
 import android.net.Uri
 import android.os.Build
+import android.util.Log
 import com.autoedit.engine.AudioDsp
+import com.autoedit.engine.ClipType
 import com.autoedit.engine.EasingType
 import com.autoedit.engine.FormulaCatalog
 import com.autoedit.engine.ProjectModel
 import com.autoedit.engine.TimelineMath
-import com.autoedit.render.ExportRenderer
+import com.autoedit.export.AacEncoder
+import com.autoedit.export.EncoderCapabilities
+import com.autoedit.export.ExportProgress
+import com.autoedit.export.GpuFrameRenderer
+import com.autoedit.export.SurfaceEncoder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.abs
 
+/**
+ * VIDEO EXPORT PIPELINE (surface-based, hardware encoded).
+ *
+ * Architecture:
+ *
+ *   IMAGE (one clip decoded at a time)
+ *     -> GpuFrameRenderer (EGL + OpenGL ES 2.0, motion / transitions / look)
+ *     -> MediaCodec INPUT SURFACE (COLOR_FormatSurface, eglPresentationTimeANDROID)
+ *     -> hardware H.264 encoder
+ *     -> MediaMuxer -> temp video MP4
+ *
+ *   VOICE + MUSIC (MediaExtractor/MediaCodec decode, DSP mix)
+ *     -> AAC encoder -> temp audio MP4
+ *
+ *   temp video + temp audio -> MediaExtractor interleave -> MediaMuxer -> FINAL MP4
+ *     -> verification (size / duration / resolution / first frame decodes)
+ *     -> best-effort MediaStore copy
+ *
+ * The old CPU pipeline (Bitmap -> manual YUV conversion ->
+ * queueInputBuffer) has been REMOVED: there is no video YUV path, no
+ * per-frame getPixels, and no getInputImage anywhere in this file.
+ */
 class VideoExporter(private val ctx: Context) {
 
     class ExportCancelled : Exception("cancelled")
 
-    // MediaCodec.OUTPUT_FORMAT_MP4 (value 2) - not present in the SDK stub, so kept as a constant
-    private val OUTPUT_FORMAT_MP4 = 2
+    /** Export failure with a stage + a human-readable, specific message. */
+    class ExportException(val stage: String, message: String, cause: Throwable? = null) :
+        Exception(message, cause)
 
-    private var pixels = IntArray(0)
+    data class ExportResult(val file: File, val mediaStoreUri: Uri?, val warning: String?)
+
+    private companion object {
+        const val TAG = "AutoEditExport"
+    }
+
+    private fun rootMsg(e: Throwable): String {
+        val parts = ArrayList<String>()
+        var cur: Throwable? = e
+        var depth = 0
+        while (cur != null && depth < 3) {
+            val m = cur.message
+            if (!m.isNullOrBlank()) parts.add(m)
+            cur = cur.cause
+            depth++
+        }
+        return if (parts.isEmpty()) e.javaClass.simpleName else parts.joinToString(" -> ")
+    }
 
     /**
-     * Full export pipeline (runs on [Dispatchers.Default] via the caller):
-     * 1. decode voice + music, mix to mono 48k PCM
-     * 2. render every frame to a bitmap, H.264 encode, mux to temp mp4
-     * 3. AAC encode the mixed audio, mux to temp m4a
-     * 4. remux video + audio into the final mp4
-     * 5. copy to MediaStore: Movies/Auto Edit/
+     * Full export pipeline (runs on Dispatchers.Default via the caller).
      */
     suspend fun export(
         project: ProjectModel,
+        tempDir: File,
+        exportDir: File,
         isCancelled: () -> Boolean = { false },
         onProgress: suspend (Float, String) -> Unit
-    ): Result<Uri> {
-        val stamp = System.currentTimeMillis()
-        val tmpVideo = File(ctx.cacheDir, "ae-video-$stamp.mp4")
-        val tmpAudio = File(ctx.cacheDir, "ae-audio-$stamp.m4a")
-        val tmpFinal = File(ctx.cacheDir, "ae-final-$stamp.mp4")
+    ): Result<ExportResult> {
+        var success = false
+        var finalFile: File? = null
+        var runDir: File? = null
+        var warning: String? = null
         try {
             val p = project
-            val total = p.totalDuration()
-            if (total <= 0.0 || p.clips.isEmpty()) {
-                throw IllegalStateException("Add images before exporting.")
+            if (p.clips.isEmpty()) {
+                throw ExportException("prepare", "Add images before exporting.")
             }
-            val w = p.export.widthFor(p.aspect)
-            val h = p.export.heightFor(p.aspect)
-            val fps = p.export.fps
+            val total = p.clipDurations().sumOf { it.coerceAtLeast(0.0) }
+            if (total <= 0.0) {
+                throw ExportException("prepare", "Project has no duration.")
+            }
+
+            // ----------------------------------------------------------------
+            // STAGE 1 (0-5%): prepare - capability probe, dirs, temp run dir
+            // ----------------------------------------------------------------
+            onProgress(ExportProgress.prep(0.2f), "Preparing…")
+            val a = p.aspect
+            val resolved = EncoderCapabilities.resolve(p.export.quality, a.w, a.h, p.export.fps)
+            if (resolved.fallback != null) warning = resolved.fallback
+            val w = resolved.width
+            val h = resolved.height
+            val fps = resolved.fps
             val frames = (total * fps).toInt().coerceAtLeast(1)
+            val expectedSec = frames / fps.toDouble()
             val easing = FormulaCatalog.byId(p.formulaId)?.easing ?: EasingType.EASE_IN_OUT
+            Log.i(
+                TAG,
+                "export start: ${p.clips.size} clips, $frames frames, ${w}x$h@${fps}, " +
+                    "total=%.2fs, bitrate=%d (requested %s)"
+                    .format(total, p.export.videoBitrate, p.export.quality.label)
+            )
+            if (warning != null) onProgress(ExportProgress.prep(0.4f), warning)
 
-            var voicePcm: AudioDsp.PcmAudio? = null
-            var musicPcm: AudioDsp.PcmAudio? = null
-            val voiceCfg = p.voice
-            val musicCfg = p.music
-            if (voiceCfg != null) {
-                onProgress(0.02f, "Loading voice…")
-                voicePcm = AudioDecoder.decode(ctx, voiceCfg.uri, total + voiceCfg.offsetSec + 2.0, isCancelled)
+            onProgress(ExportProgress.prep(0.6f), "Preparing…")
+            if (!tempDir.exists() && !tempDir.mkdirs()) {
+                throw ExportException("prepare", "Could not create temp folder: ${tempDir.absolutePath}")
             }
-            if (musicCfg != null) {
-                onProgress(0.05f, "Loading music…")
-                musicPcm = AudioDecoder.decode(ctx, musicCfg.uri, total + 2.0, isCancelled)
+            if (!exportDir.exists() && !exportDir.mkdirs()) {
+                throw ExportException("prepare", "Could not create export folder: ${exportDir.absolutePath}")
             }
-            var mixed: ShortArray? = null
-            if (voicePcm != null || musicPcm != null) {
-                onProgress(0.08f, "Mixing audio…")
-                mixed = AudioDsp.mix(total, voicePcm, voiceCfg, musicPcm, musicCfg, p.duckMusic)
+            runDir = File(tempDir, "run-${System.currentTimeMillis()}")
+            if (!runDir!!.mkdirs()) {
+                throw ExportException("prepare", "Could not create run temp folder.")
             }
+            val videoTemp = File(runDir!!, "video-temp.mp4")
+            val audioTemp = File(runDir!!, "audio-temp.mp4")
+            val stamp = SimpleDateFormat("yyyy-MM-dd-HH-mm-ss", Locale.US).format(Date())
+            val safeName = p.name.replace(Regex("[\\\\/:*?\"<>|]"), " ").trim().ifBlank { "Project" }
+            finalFile = File(exportDir, "Auto Edit - $safeName - $stamp.mp4")
 
-            onProgress(0.1f, "Rendering frames…")
-            val frameBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(frameBmp)
-            val renderer = ExportRenderer(w, h, p.adjustments, easing)
-            val cache = ClipImageCache(ctx, w, h)
+            // ----------------------------------------------------------------
+            // STAGE 2 (5-85%): GPU render -> hardware H.264 -> temp video MP4
+            // ----------------------------------------------------------------
+            onProgress(ExportProgress.render(0f), "Rendering frames 0/$frames")
             try {
-                encodeVideo(
-                    p, frames, w, h, fps, tmpVideo, frameBmp, canvas, renderer, cache, isCancelled
-                ) { frac ->
-                    onProgress(0.1f + frac * 0.75f, "Rendering… ${(frac * 100).toInt()}%")
+                renderVideo(p, w, h, fps, frames, videoTemp, easing, isCancelled) { frac ->
+                    val n = (frac * frames).toInt().coerceIn(0, frames)
+                    onProgress(
+                        ExportProgress.render(frac),
+                        if (frames > 200) "Rendering frames $n/$frames" else "Rendering frames $n/$frames"
+                    )
                 }
-            } finally {
-                renderer.release()
-                cache.clear()
-                try { frameBmp.recycle() } catch (_: Exception) {}
+            } catch (e: SurfaceEncoder.EncoderStuckException) {
+                throw ExportException("video encode", e.message ?: "Video encoder stopped responding.", e)
+            } catch (e: GpuFrameRenderer.GpuException) {
+                throw ExportException(
+                    "video encode",
+                    "GPU rendering failed on this device: ${rootMsg(e)}. Please try again.", e
+                )
+            } catch (e: ExportCancelled) {
+                throw e
+            } catch (e: Exception) {
+                throw ExportException("video encode", "Video rendering failed: ${rootMsg(e)}", e)
+            }
+            if (!videoTemp.exists() || videoTemp.length() == 0L) {
+                throw ExportException("video encode", "Encoder produced an empty video file.")
+            }
+            Log.i(TAG, "video stage done: ${videoTemp.length() / 1024} KB temp MP4")
+
+            // ----------------------------------------------------------------
+            // STAGE 3 (85-92%): audio decode/mix/encode (skipped if none set)
+            // ----------------------------------------------------------------
+            var audioOk = false
+            val hasAudio = p.voice != null || p.music != null
+            if (hasAudio) {
+                try {
+                    encodeAudioStage(p, total, audioTemp, isCancelled) { sub, label ->
+                        onProgress(ExportProgress.audio(sub), label)
+                    }
+                    audioOk = audioTemp.exists() && audioTemp.length() > 0
+                } catch (e: ExportCancelled) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.e(TAG, "audio stage failed - continuing video-only", e)
+                    warning = (warning?.plus(" • ") ?: "") +
+                        "Video saved WITHOUT audio (audio failed: ${rootMsg(e).take(120)})"
+                }
             }
 
-            if (mixed != null) {
-                onProgress(0.87f, "Encoding audio…")
-                encodeAac(mixed, tmpAudio)
+            // ----------------------------------------------------------------
+            // STAGE 4 (92-98%): final mux + verification
+            // ----------------------------------------------------------------
+            onProgress(ExportProgress.mux(0.1f), "Finalizing…")
+            try {
+                if (audioOk) {
+                    remuxToFinal(videoTemp, audioTemp, finalFile!!) { frac ->
+                        onProgress(ExportProgress.mux(0.1f + frac * 0.6f), "Finalizing…")
+                    }
+                } else {
+                    moveOrCopy(videoTemp, finalFile!!)
+                }
+            } catch (e: ExportCancelled) {
+                throw e
+            } catch (e: Exception) {
+                throw ExportException("finalize", "Could not finalize the video: ${rootMsg(e)}", e)
             }
+            val verifyErr = verifyMp4(finalFile!!, w, h, expectedSec)
+            if (verifyErr != null) {
+                throw ExportException("finalize", "Exported file failed verification: $verifyErr")
+            }
+            onProgress(ExportProgress.mux(0.95f), "Finalizing…")
+            Log.i(TAG, "final MP4 verified: ${finalFile!!.length() / 1024} KB")
 
-            onProgress(0.93f, "Finalizing…")
-            remux(tmpVideo, if (mixed != null) tmpAudio else null, tmpFinal)
-
-            onProgress(0.97f, "Saving to Movies/Auto Edit…")
-            val uri = saveToMediaStore(tmpFinal, p)
-            onProgress(1f, "Done")
-            return Result.success(uri)
+            // ----------------------------------------------------------------
+            // STAGE 5 (98-100%): MediaStore copy (best effort)
+            // ----------------------------------------------------------------
+            onProgress(ExportProgress.save(0.2f), "Saving…")
+            val store = copyToMediaStore(p, finalFile!!)
+            success = true
+            onProgress(ExportProgress.DONE, "Done")
+            Log.i(TAG, "export complete: ${finalFile!!.absolutePath}${if (store != null) " (+ MediaStore copy)" else ""}")
+            return Result.success(ExportResult(finalFile!!, store, warning))
         } catch (e: ExportCancelled) {
             onProgress(0f, "Cancelled")
+            Log.i(TAG, "export cancelled")
             return Result.failure(e)
         } catch (e: InterruptedException) {
             onProgress(0f, "Cancelled")
             return Result.failure(ExportCancelled())
         } catch (e: OutOfMemoryError) {
+            Log.e(TAG, "export OOM", e)
             onProgress(0f, "Out of memory")
             return Result.failure(e)
-        } catch (e: Exception) {
+        } catch (e: ExportException) {
+            Log.e(TAG, "export failed at stage=${e.stage}", e)
             onProgress(0f, "Failed")
             return Result.failure(e)
+        } catch (e: Exception) {
+            Log.e(TAG, "export failed", e)
+            onProgress(0f, "Failed")
+            return Result.failure(ExportException("export", "Export failed: ${rootMsg(e)}", e))
         } finally {
-            tmpVideo.delete()
-            tmpAudio.delete()
-            tmpFinal.delete()
+            // temp/ is ALWAYS cleaned (success, failure, cancellation)
+            runDir?.let { d ->
+                val ok = runCatching { d.deleteRecursively() }.isSuccess
+                if (!ok) Log.w(TAG, "could not clean run temp dir ${d.absolutePath}")
+            }
+            val cleanOk = runCatching { tempDir.deleteRecursively() }.isSuccess
+            if (!cleanOk) Log.w(TAG, "could not clean temp dir ${tempDir.absolutePath}")
+            if (!success) {
+                val f = finalFile
+                if (f != null && f.exists() && !f.delete()) {
+                    Log.w(TAG, "could not delete partial export ${f.absolutePath}")
+                }
+            }
         }
     }
 
-    // ---------------------------------------------------------------- video
+    // ================================================================ video
 
-    private suspend fun encodeVideo(
+    private suspend fun renderVideo(
         p: ProjectModel,
-        frames: Int,
         w: Int,
         h: Int,
         fps: Int,
-        out: File,
-        frameBmp: Bitmap,
-        canvas: Canvas,
-        renderer: ExportRenderer,
-        cache: ClipImageCache,
+        frames: Int,
+        videoTemp: File,
+        easing: EasingType,
         isCancelled: () -> Boolean,
-        onFrame: suspend (Float) -> Unit
+        onFrac: suspend (Float) -> Unit
     ) {
-        val encoder = MediaCodec.createEncoderByType("video/avc")
-        val muxer = MediaMuxer(out.absolutePath, OUTPUT_FORMAT_MP4)
-        val info = MediaCodec.BufferInfo()
-        var videoTrack = -1
-        var muxerStarted = false
-        var formatSeen = false
+        val encoder = SurfaceEncoder(w, h, fps, p.export.videoBitrate, videoTemp)
+        val renderer = GpuFrameRenderer(ctx, w, h, p.adjustments, easing)
+        val videoDecoders = HashMap<Int, VideoFrameDecoder>()
+        var rendererReady = false
         try {
-            val fmt = MediaFormat.createVideoFormat("video/avc", w, h).apply {
-                setInteger(MediaFormat.KEY_BIT_RATE, p.export.videoBitrate)
-                setInteger(MediaFormat.KEY_FRAME_RATE, fps)
-                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
-                setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible)
-            }
-            encoder.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            encoder.start()
+            encoder.init()
+            val surface = encoder.inputSurface
+                ?: throw ExportException("video encode", "Encoder did not create an input surface.")
+            renderer.init(surface)
+            rendererReady = true
+            onFrac(0f)
 
-            fun handleOutput(o: Int): Boolean {
-                return when {
-                    o == 0 -> {
-                        if (info.flags and MediaCodec.INFO_OUTPUT_FORMAT_CHANGED != 0) {
-                            if (!formatSeen) {
-                                formatSeen = true
-                                videoTrack = muxer.addTrack(encoder.outputFormat)
-                            }
-                        }
-                        if (info.size > 0 && videoTrack >= 0) {
-                            val buf = encoder.getOutputBuffer(0)
-                            if (buf != null) {
-                                if (!muxerStarted) { muxer.start(); muxerStarted = true }
-                                muxer.writeSampleData(videoTrack, buf, info)
-                            }
-                        }
-                        encoder.releaseOutputBuffer(0, false)
-                        (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0)
-                    }
-                    o == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-                        if (!formatSeen) {
-                            formatSeen = true
-                            videoTrack = muxer.addTrack(encoder.outputFormat)
-                        }
-                        false
-                    }
-                    else -> false
-                }
-            }
+            val durations = p.clipDurations()
 
             for (i in 0 until frames) {
                 if (isCancelled() || Thread.currentThread().isInterrupted) throw ExportCancelled()
                 val t = i / fps.toDouble()
-                val state = TimelineMath.frameAt(t, p.clips.size, p.effectiveClipDuration(), p.transitionDurationSec)
-                cache.prepare(state, p)
-                canvas.drawColor(Color.BLACK)
-                renderer.render(canvas, p, state) { idx -> cache.get(idx) }
-                feedVideoInput(encoder, frameBmp, i.toLong() * 1_000_000_000L / fps) {
-                    while (true) {
-                        val o = encoder.dequeueOutputBuffer(info, 2_000)
-                        if (o == MediaCodec.INFO_TRY_AGAIN_LATER) break
-                        if (handleOutput(o)) break
-                        if (o == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED) continue
+                val state = TimelineMath.frameAt(t, durations, p.transitionDurationSec)
+
+                // fetch decoder frames for any VIDEO clips on screen (rare)
+                val videoFrame: (Int, Long) -> YuvFrame? = { idx, neededMs ->
+                    val c = p.clips.getOrNull(idx)
+                    if (c == null || c.type != ClipType.VIDEO) {
+                        null
+                    } else {
+                        val dec = videoDecoders.getOrPut(idx) {
+                            VideoFrameDecoder(ctx, c.uri, c.videoInMs, c.videoOutMs, maxOf(w, h) * 3 / 2).also { it.init() }
+                        }
+                        dec.nextFrame(neededMs * 1000L)
                     }
                 }
-                val eos = handleOutput(encoder.dequeueOutputBuffer(info, 0))
-                if (eos) {
-                    // input queue full; keep draining until space
-                    while (true) {
-                        val o = encoder.dequeueOutputBuffer(info, 10_000)
-                        if (o != MediaCodec.INFO_TRY_AGAIN_LATER && handleOutput(o)) break
-                        if (o == MediaCodec.INFO_TRY_AGAIN_LATER && eos) break
-                    }
-                }
-                if (i % 5 == 0) onFrame(i.toFloat() / frames)
+
+                renderer.renderFrame(p, state, durations, videoFrame)
+                val ptsNs = i.toLong() * 1_000_000_000L / fps
+                renderer.setPresentationTimeNs(ptsNs)
+                renderer.swap() // blocks with natural backpressure when the encoder queue is full
+                encoder.noteFrameRendered()
+                encoder.drain(blocking = false)
+                if (i % 30 == 0 || i == frames - 1) onFrac((i + 1).toFloat() / frames)
             }
 
-            // end of stream
-            feedVideoInput(encoder, frameBmp, frames.toLong() * 1_000_000_000L / fps, isEos = true) {
-                while (true) {
-                    val o = encoder.dequeueOutputBuffer(info, 5_000)
-                    if (o == MediaCodec.INFO_TRY_AGAIN_LATER) break
-                    if (handleOutput(o)) break
-                }
-            }
-            var eos = false
-            while (!eos) {
-                val o = encoder.dequeueOutputBuffer(info, 100_000)
-                if (o == MediaCodec.INFO_TRY_AGAIN_LATER) continue
-                eos = handleOutput(o)
-            }
+            encoder.finishEos(isCancelled)
+            Log.i(TAG, "render loop finished: $frames frames at ${fps} fps")
         } finally {
-            try { encoder.stop() } catch (_: Exception) {}
-            try { encoder.release() } catch (_: Exception) {}
-            try {
-                if (muxerStarted) muxer.stop()
-            } catch (_: Exception) {}
-            try { muxer.release() } catch (_: Exception) {}
+            for (d in videoDecoders.values) {
+                runCatching { d.release() }
+            }
+            videoDecoders.clear()
+            if (rendererReady) renderer.release()
+            encoder.release()
         }
     }
 
-    private inline fun feedVideoInput(
-        encoder: MediaCodec,
-        bmp: Bitmap,
-        pts: Long,
-        isEos: Boolean = false,
-        drain: () -> Unit
+    // ================================================================ audio
+
+    private suspend fun encodeAudioStage(
+        p: ProjectModel,
+        total: Double,
+        audioTemp: File,
+        isCancelled: () -> Boolean,
+        onAudio: suspend (Float, String) -> Unit
     ) {
-        var guard = 0
-        while (true) {
-            val idx = encoder.dequeueInputBuffer(20_000)
-            if (idx >= 0) {
-                if (isEos) {
-                    encoder.queueInputBuffer(idx, 0, 0, pts, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                    return
-                }
-                val img = encoder.getInputImage(idx)
-                if (img != null) {
-                    writeYuv(img, bmp)
-                    encoder.queueInputBuffer(idx, 0, bmp.width * bmp.height * 3 / 2, pts, 0)
-                    return
-                }
-            }
-            guard++
-            if (guard > 300) throw IllegalStateException("Video encoder is not accepting frames.")
-            drain()
+        onAudio(0.05f, "Loading audio…")
+        var voicePcm: AudioDsp.PcmAudio? = null
+        var musicPcm: AudioDsp.PcmAudio? = null
+        val voiceCfg = p.voice
+        val musicCfg = p.music
+        if (voiceCfg != null) {
+            voicePcm = AudioDecoder.decode(ctx, voiceCfg.uri, total + voiceCfg.offsetSec + 2.0, isCancelled)
         }
+        if (musicCfg != null) {
+            onAudio(0.25f, "Loading audio…")
+            musicPcm = AudioDecoder.decode(ctx, musicCfg.uri, total + 2.0, isCancelled)
+        }
+        onAudio(0.45f, "Mixing audio…")
+        var mixed = AudioDsp.mix(total, voicePcm, voiceCfg, musicPcm, musicCfg, p.duckMusic)
+        // trim/pad to EXACTLY the video sample count
+        mixed = AudioDsp.toExactLength(mixed, AudioDsp.exactSampleCount(total))
+        onAudio(0.55f, "Encoding audio…")
+        AacEncoder.encode(mixed, audioTemp)
+        onAudio(0.95f, "Encoding audio…")
+        Log.i(TAG, "audio stage done: ${audioTemp.length() / 1024} KB AAC temp MP4")
     }
 
-    private fun writeYuv(img: Image, bmp: Bitmap) {
-        val w = bmp.width
-        val h = bmp.height
-        if (pixels.size < w * h) pixels = IntArray(w * h)
-        bmp.getPixels(pixels, 0, w, 0, 0, w, h)
-        val yPlane = img.planes[0]
-        val uPlane = img.planes[1]
-        val vPlane = img.planes[2]
-        val yRow = yPlane.rowStride
-        val uRow = uPlane.rowStride
-        val vRow = vPlane.rowStride
-        val uPix = uPlane.pixelStride
-        val vPix = vPlane.pixelStride
-        val yB = yPlane.buffer
-        val uB = uPlane.buffer
-        val vB = vPlane.buffer
-        for (yy in 0 until h) {
-            var ui = yy * uRow
-            var vi = yy * vRow
-            for (xx in 0 until w) {
-                val p = pixels[yy * w + xx]
-                val r = (p shr 16) and 0xFF
-                val g = (p shr 8) and 0xFF
-                val b = p and 0xFF
-                val y = (0.299 * r + 0.587 * g + 0.114 * b).toInt().coerceIn(0, 255)
-                val u = ((b - y) * 0.564 + 128).toInt().coerceIn(0, 255)
-                val v = ((r - y) * 0.713 + 128).toInt().coerceIn(0, 255)
-                yB.put(yy * yRow + xx, y.toByte())
-                if (xx and 1 == 0) {
-                    uB.put(ui, u.toByte())
-                    vB.put(vi, v.toByte())
-                    ui += uPix
-                    vi += vPix
-                }
-            }
-        }
-    }
+    // ================================================================ final
 
-    // ---------------------------------------------------------------- audio
-
-    private fun encodeAac(pcm: ShortArray, out: File) {
-        val encoder = MediaCodec.createEncoderByType("audio/mp4a.4ac.001a010000")
-        val muxer = MediaMuxer(out.absolutePath, OUTPUT_FORMAT_MP4)
-        val info = MediaCodec.BufferInfo()
-        var track = -1
+    /** Stream-copy remux: temp video + temp audio -> final MP4 (interleaved by PTS). */
+    private suspend fun remuxToFinal(videoIn: File, audioIn: File, out: File, onFrac: suspend (Float) -> Unit) {
+        val ve = MediaExtractor()
+        val ae = MediaExtractor()
+                val muxer = MediaMuxer(out.absolutePath, 2) // MediaMuxer.OUTPUT_FORMAT_MPEG_4
         var started = false
         try {
-            val fmt = MediaFormat.createAudioFormat("audio/mp4a.4ac.001a010000", AudioDsp.TARGET_RATE, 1).apply {
-                setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-                setInteger(MediaFormat.KEY_BIT_RATE, 128_000)
-                setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 32_000)
-            }
-            encoder.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            encoder.start()
-            val chunk = 1024
-            var i = 0
-            while (i < pcm.size) {
-                val n = minOf(chunk, pcm.size - i)
-                var guard = 0
-                while (true) {
-                    val idx = encoder.dequeueInputBuffer(20_000)
-                    if (idx >= 0) {
-                        val buf = encoder.getInputBuffer(idx)
-                        if (buf != null) {
-                            buf.clear()
-                            for (k in 0 until n) {
-                                val s = pcm[i + k].toInt()
-                                buf.put((s and 0xFF).toByte())
-                                buf.put(((s shr 8) and 0xFF).toByte())
-                            }
-                            encoder.queueInputBuffer(
-                                idx, 0, n * 2,
-                                i.toLong() * 1_000_000_000L / AudioDsp.TARGET_RATE, 0
-                            )
-                            break
-                        }
-                    }
-                    guard++
-                    if (guard > 300) throw IllegalStateException("Audio encoder is not accepting frames.")
-                }
-                i += n
-            }
-            var guard = 0
-            while (true) {
-                val idx = encoder.dequeueInputBuffer(20_000)
-                if (idx >= 0) {
-                    encoder.queueInputBuffer(idx, 0, 0, i.toLong() * 1_000_000_000L / AudioDsp.TARGET_RATE, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+            ve.setDataSource(videoIn.absolutePath)
+            ae.setDataSource(audioIn.absolutePath)
+            var vTrack = -1
+            var aTrack = -1
+            for (i in 0 until ve.trackCount) {
+                val m = ve.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: continue
+                if (m.startsWith("video/")) {
+                    vTrack = i
                     break
                 }
-                guard++
-                if (guard > 300) break
             }
-            var eos = false
-            while (!eos) {
-                val o = encoder.dequeueOutputBuffer(info, 100_000)
-                if (o == 0) {
-                    if (info.flags and MediaCodec.INFO_OUTPUT_FORMAT_CHANGED != 0) {
-                        if (track < 0) track = muxer.addTrack(encoder.outputFormat)
-                    }
-                    if (info.size > 0 && track >= 0) {
-                        val buf = encoder.getOutputBuffer(0)
-                        if (buf != null) {
-                            if (!started) { muxer.start(); started = true }
-                            muxer.writeSampleData(track, buf, info)
-                        }
-                    }
-                    encoder.releaseOutputBuffer(0, false)
-                    eos = (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0)
-                } else if (o == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                    if (track < 0) track = muxer.addTrack(encoder.outputFormat)
+            for (i in 0 until ae.trackCount) {
+                val m = ae.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: continue
+                if (m.startsWith("audio/")) {
+                    aTrack = i
+                    break
                 }
             }
-        } finally {
-            try { encoder.stop() } catch (_: Exception) {}
-            try { encoder.release() } catch (_: Exception) {}
-            try { if (started) muxer.stop() } catch (_: Exception) {}
-            try { muxer.release() } catch (_: Exception) {}
-        }
-    }
+            if (vTrack < 0) throw ExportException("finalize", "Video temp has no video track.")
+            if (aTrack < 0) throw ExportException("finalize", "Audio temp has no audio track.")
+            ve.selectTrack(vTrack)
+            ae.selectTrack(aTrack)
+            val outV = muxer.addTrack(ve.getTrackFormat(vTrack))
+            val outA = muxer.addTrack(ae.getTrackFormat(aTrack))
+            muxer.start()
+            started = true
+            Log.i(TAG, "final mux started: video+audio -> ${out.name}")
 
-    // ---------------------------------------------------------------- remux
-
-    private fun remux(video: File, audio: File?, out: File) {
-        val ev = MediaExtractor().apply { setDataSource(video.absolutePath) }
-        val ea = audio?.let { MediaExtractor().apply { setDataSource(it.absolutePath) } }
-        try {
-            val vTrack = (0 until ev.trackCount).first {
-                ev.getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("video/") == true
-            }
-            ev.selectTrack(vTrack)
-            val fmtV = ev.getTrackFormat(vTrack)
-            val mux = MediaMuxer(out.absolutePath, OUTPUT_FORMAT_MP4)
-            try {
-                var aTrack = -1
-                var fmtA: MediaFormat? = null
-                if (ea != null) {
-                    aTrack = (0 until ea.trackCount).first {
-                        ea.getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true
+            val buf = ByteBuffer.allocateDirect(1 shl 20)
+            val info = android.media.MediaCodec.BufferInfo()
+            var vDone = false
+            var aDone = false
+            var samples = 0L
+            var vSamples = 0L
+            while (!vDone || !aDone) {
+                val pickVideo = when {
+                    vDone -> false
+                    aDone -> true
+                    else -> {
+                        val vt = ve.sampleTime
+                        val at = ae.sampleTime
+                        if (vt < 0) false else if (at < 0) true else vt <= at
                     }
-                    ea.selectTrack(aTrack)
-                    fmtA = ea.getTrackFormat(aTrack)
                 }
-                val outV = mux.addTrack(fmtV)
-                val outA = if (fmtA != null) mux.addTrack(fmtA) else -1
-                mux.start()
-                val buf = java.nio.ByteBuffer.allocate(512 * 1024)
-                val info = MediaCodec.BufferInfo()
-                var nextV = ev.sampleTime
-                var nextA = if (ea != null) ea.sampleTime else Long.MAX_VALUE
-                var doneV = false
-                var doneA = ea == null
-                while (!doneV || !doneA) {
-                    val takeV = if (doneA) true else if (doneV) false else nextV <= nextA
-                    if (takeV) {
-                        buf.position(0)
-                        val size = ev.readSampleData(buf, 0)
-                        if (size < 0) {
-                            doneV = true
-                        } else {
-                            info.size = size
-                            info.offset = 0
-                            info.presentationTimeUs = ev.sampleTime
-                            info.flags = ev.sampleFlags
-                            mux.writeSampleData(outV, buf, info)
-                            nextV = ev.sampleTime
-                        }
+                if (pickVideo) {
+                    buf.clear()
+                    val n = ve.readSampleData(buf, 0)
+                    if (n < 0) {
+                        vDone = true
                     } else {
-                        val a = ea!!
-                        buf.position(0)
-                        val size = a.readSampleData(buf, 0)
-                        if (size < 0) {
-                            doneA = true
-                        } else {
-                            info.size = size
-                            info.offset = 0
-                            info.presentationTimeUs = a.sampleTime
-                            info.flags = a.sampleFlags
-                            mux.writeSampleData(outA, buf, info)
-                            nextA = a.sampleTime
-                        }
+                        info.size = n
+                        info.offset = 0
+                        info.presentationTimeUs = ve.sampleTime
+                        info.flags = if (ve.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0)
+                            MediaCodec.BUFFER_FLAG_SYNC_FRAME else 0
+                        muxer.writeSampleData(outV, buf, info)
+                        samples++
+                        vSamples++
+                    }
+                } else {
+                    buf.clear()
+                    val n = ae.readSampleData(buf, 0)
+                    if (n < 0) {
+                        aDone = true
+                    } else {
+                        info.size = n
+                        info.offset = 0
+                        info.presentationTimeUs = ae.sampleTime
+                        info.flags = if (ae.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0)
+                            MediaCodec.BUFFER_FLAG_SYNC_FRAME else 0
+                        muxer.writeSampleData(outA, buf, info)
+                        samples++
                     }
                 }
-                mux.stop()
-            } finally {
-                try { mux.release() } catch (_: Exception) {}
+                if (samples % 64 == 0L) onFrac(0.5f)
             }
+            onFrac(0.9f)
+            Log.i(TAG, "final mux finished: $samples samples (video=$vSamples)")
         } finally {
-            try { ev.release() } catch (_: Exception) {}
-            try { ea?.release() } catch (_: Exception) {}
+            try {
+                if (started) muxer.stop()
+            } catch (e: Exception) {
+                Log.w(TAG, "final muxer stop failed", e)
+            }
+            try {
+                muxer.release()
+            } catch (e: Exception) {
+                Log.w(TAG, "final muxer release failed", e)
+            }
+            try {
+                ve.release()
+            } catch (e: Exception) {
+                Log.w(TAG, "video extractor release failed", e)
+            }
+            try {
+                ae.release()
+            } catch (e: Exception) {
+                Log.w(TAG, "audio extractor release failed", e)
+            }
         }
     }
 
-    // ---------------------------------------------------------------- save
-
-    private fun saveToMediaStore(src: File, p: ProjectModel): Uri {
-        val values = ContentValues()
-        val stamp = SimpleDateFormat("yyyy-MM-dd-HH-mm-ss", Locale.US).format(Date())
-        val safeName = p.name.replace(Regex("[\\\\/:*?\"<>|]"), " ").trim().ifBlank { "Project" }
-        values.put(android.provider.MediaStore.Video.Media.DISPLAY_NAME, "Auto Edit - $safeName - $stamp.mp4")
-        values.put(android.provider.MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-        if (Build.VERSION.SDK_INT >= 29) {
-            values.put(android.provider.MediaStore.Video.Media.RELATIVE_PATH, "Movies/Auto Edit")
-            values.put(android.provider.MediaStore.Video.Media.IS_PENDING, 1)
+    private fun moveOrCopy(from: File, to: File) {
+        if (!from.renameTo(to)) {
+            to.outputStream().use { out -> from.inputStream().use { it.copyTo(out, 1024 * 1024) } }
+            if (!from.delete()) Log.w(TAG, "could not delete ${from.absolutePath} after copy")
         }
-        val uri = ctx.contentResolver.insert(
-            android.provider.MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values
-        ) ?: throw IllegalStateException("Not enough storage or could not create the video file.")
-        try {
-            val out = ctx.contentResolver.openOutputStream(uri)
-                ?: throw IllegalStateException("Not enough storage to export this video.")
-            out.use { o ->
-                src.inputStream().use { it.copyTo(o) }
+    }
+
+    /** Post-finalize verification. Returns an error string, or null when OK. */
+    private fun verifyMp4(file: File, w: Int, h: Int, expectedSec: Double): String? {
+        return try {
+            if (!file.exists() || file.length() <= 0L) return "file missing or empty"
+            val r = MediaMetadataRetriever()
+            try {
+                r.setDataSource(file.absolutePath)
+                val durMs = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                val ww = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull()
+                val hh = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull()
+                val codec = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE)
+                Log.i(TAG, "verify: ${file.length() / 1024} KB, ${durMs}ms, ${ww}x$hh, codec=$codec")
+                if (ww != w || hh != h) return "resolution is ${ww}x$hh, expected ${w}x$h"
+                if (abs(durMs / 1000.0 - expectedSec) > 0.75) {
+                    return "duration is ${durMs}ms, expected ~${(expectedSec * 1000).toLong()}ms"
+                }
+                val frame = r.getFrameAtTime(500_000, MediaMetadataRetriever.OPTION_CLOSEST)
+                    ?: return "first frame could not be decoded"
+                frame.recycle()
+                null
+            } finally {
+                runCatching { r.release() }
+            }
+        } catch (e: Exception) {
+            "verification failed: ${rootMsg(e)}"
+        }
+    }
+
+    // ================================================================ store
+
+    /** Best-effort copy into MediaStore (Movies/Auto Edit). Never throws. */
+    private fun copyToMediaStore(p: ProjectModel, file: File): Uri? {
+        return try {
+            val stamp = SimpleDateFormat("yyyy-MM-dd-HH-mm-ss", Locale.US).format(Date())
+            val safeName = p.name.replace(Regex("[\\\\/:*?\"<>|]"), " ").trim().ifBlank { "Project" }
+            val values = ContentValues().apply {
+                put(android.provider.MediaStore.Video.Media.DISPLAY_NAME, "Auto Edit - $safeName - $stamp.mp4")
+                put(android.provider.MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                if (Build.VERSION.SDK_INT >= 29) {
+                    put(android.provider.MediaStore.Video.Media.RELATIVE_PATH, "Movies/Auto Edit")
+                    put(android.provider.MediaStore.Video.Media.IS_PENDING, 1)
+                }
+            }
+            val uri = ctx.contentResolver.insert(
+                android.provider.MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values
+            ) ?: return null
+            ctx.contentResolver.openOutputStream(uri)?.use { out ->
+                file.inputStream().use { it.copyTo(out, 1024 * 1024) }
+            } ?: run {
+                runCatching { ctx.contentResolver.delete(uri, null, null) }
+                return null
             }
             if (Build.VERSION.SDK_INT >= 29) {
                 val done = ContentValues().apply {
@@ -491,10 +536,10 @@ class VideoExporter(private val ctx: Context) {
                 }
                 ctx.contentResolver.update(uri, done, null, null)
             }
-            return uri
+            uri
         } catch (e: Exception) {
-            runCatching { ctx.contentResolver.delete(uri, null, null) }
-            throw e
+            Log.w(TAG, "media store copy failed (export file is kept in the project folder)", e)
+            null
         }
     }
 }

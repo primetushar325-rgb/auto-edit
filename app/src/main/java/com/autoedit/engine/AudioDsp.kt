@@ -39,6 +39,15 @@ object AudioDsp {
         return out
     }
 
+    /**
+     * Exact 48kHz sample count for a project of [totalSec] seconds.
+     * Long arithmetic: Int would overflow for projects longer than ~24 min at 30fps.
+     */
+    fun exactSampleCount(totalSec: Double): Int {
+        val n = (totalSec * TARGET_RATE).toLong()
+        return n.coerceIn(0L, 2_000_000_000L).toInt()
+    }
+
     /** Convert decoded PCM (any rate, 1-2ch) to mono 48 kHz. */
     fun normalize(pcm: ShortArray, channels: Int, fromRate: Int): PcmAudio {
         val mono = toMono(pcm, channels)
@@ -46,9 +55,19 @@ object AudioDsp {
         return PcmAudio(out, TARGET_RATE)
     }
 
+    /** Truncate or silence-pad PCM to exactly [target] samples (export sync). */
+    fun toExactLength(pcm: ShortArray, target: Int): ShortArray {
+        val out = ShortArray(target.coerceAtLeast(0))
+        System.arraycopy(pcm, 0, out, 0, minOf(pcm.size, out.size))
+        return out
+    }
+
+    /** Bounds-safe sample read: any off-by-one upstream clamps to the last sample
+     *  instead of throwing - one bad index can never crash the export. */
     private fun sampleAt(a: PcmAudio, tSec: Double): Float {
         if (a.pcm.isEmpty()) return 0f
-        val idx = (tSec * a.sampleRate).toInt().coerceIn(0, a.pcm.size - 1)
+        val raw = (tSec * a.sampleRate).toInt()
+        val idx = if (raw in 0 until a.pcm.size) raw else raw.coerceIn(0, a.pcm.size - 1)
         return a.pcm[idx] / 32767f
     }
 
@@ -74,7 +93,7 @@ object AudioDsp {
         musicCfg: AudioConfig?,
         duckMusic: Boolean
     ): ShortArray {
-        val n = (totalSec * TARGET_RATE).toInt().coerceAtLeast(0)
+        val n = exactSampleCount(totalSec)
         val out = ShortArray(n)
         for (i in 0 until n) {
             val t = i / TARGET_RATE.toDouble()
