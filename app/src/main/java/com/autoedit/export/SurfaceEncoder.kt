@@ -54,6 +54,19 @@ class SurfaceEncoder(
         private const val DRAIN_TIMEOUT_US = 50_000L
     }
 
+    /**
+     * Lifecycle phase of the encoder, used to log (and guard against) illegal
+     * state transitions. The strict, documented sequence for a surface-input
+     * encoder is:
+     *
+     *   CREATED -> CONFIGURED -> SURFACE_CREATED -> RUNNING -> (EOS) -> STOPPED -> RELEASED
+     *
+     * `createInputSurface()` MUST be called after `configure()` but BEFORE
+     * `start()`; calling it while RUNNING throws
+     * "setInputSurface() is valid only at Configured state; currently at Running state".
+     */
+    private enum class Phase { CREATED, CONFIGURED, SURFACE_CREATED, RUNNING, STOPPED, RELEASED }
+
     private var codec: MediaCodec? = null
     private var muxer: MediaMuxer? = null
     private val info = MediaCodec.BufferInfo()
@@ -64,6 +77,8 @@ class SurfaceEncoder(
     private var eosSent = false
     private var samplesWritten = 0
     private var framesAccepted = 0L
+    @Volatile private var phase: Phase = Phase.RELEASED
+    @Volatile private var initCalled = false
 
     private val active = AtomicBoolean(true)
     private val stalled = AtomicBoolean(false)
@@ -77,14 +92,39 @@ class SurfaceEncoder(
     /** True when the encoder died on its own (watchdog fired). */
     val isStalled: Boolean get() = stalled.get()
 
-    /** Configure + start the encoder; returns nothing, sets [inputSurface]. */
+    private fun transition(next: Phase, note: String) {
+        val prev = phase
+        phase = next
+        Log.i(TAG, "encoder state: $prev -> $next ($note)")
+    }
+
+    /** Configure + create the input surface + start the encoder; sets [inputSurface]. */
+    @Synchronized
     fun init() {
+        // Guard against a stale/previous encoder instance still being alive when
+        // a new export begins (e.g. repeat export in the same session). Tear it
+        // down fully before creating a fresh one.
+        if (initCalled || codec != null) {
+            Log.w(TAG, "init() called while a previous encoder (phase=$phase) is still alive - releasing it first")
+            runCatching { release() }
+        }
+        initCalled = true
+        active.set(true)
+        stalled.set(false)
+        eosSent = false
+        codecStopped = false
+        samplesWritten = 0
+        framesAccepted = 0
+
         val c = try {
             MediaCodec.createEncoderByType(EncoderCapabilities.MIME_AVC)
         } catch (e: Exception) {
+            initCalled = false
             throw EncoderStartException("No H.264 hardware encoder available: ${e.message}", e)
         }
         codec = c
+        transition(Phase.CREATED, "MediaCodec created by type ${EncoderCapabilities.MIME_AVC}")
+
         val fmt = MediaFormat.createVideoFormat(EncoderCapabilities.MIME_AVC, w, h).apply {
             setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
@@ -92,32 +132,85 @@ class SurfaceEncoder(
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
         }
         try {
+            Log.i(TAG, "encoder configure: ${w}x$h @ $fps fps, ${bitrate / 1000} kbps, COLOR_FormatSurface")
             c.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            transition(Phase.CONFIGURED, "configure(CONFIGURE_FLAG_ENCODE)")
         } catch (e: Exception) {
+            Log.e(TAG, "encoder configure failed while at phase=$phase", e)
+            cleanupAfterInitFailure(c)
             throw EncoderStartException("H.264 encoder configuration failed: ${e.message}", e)
         }
-        try {
-            c.start()
-        } catch (e: Exception) {
-            throw EncoderStartException("H.264 encoder start failed: ${e.message}", e)
-        }
+
+        // IMPORTANT: createInputSurface() is valid ONLY in the Configured state.
+        // It MUST happen before start(); calling it after start() (Running state)
+        // throws: "setInputSurface() is valid only at Configured state; currently
+        // at Running state".
         val s = try {
+            Log.i(TAG, "encoder createInputSurface (must be before start())")
             c.createInputSurface()
         } catch (e: Exception) {
+            Log.e(TAG, "encoder createInputSurface failed while at phase=$phase", e)
+            cleanupAfterInitFailure(c)
             throw EncoderStartException("Failed to create encoder input surface: ${e.message}", e)
         }
         inputSurface = s
-        muxer = try {
+        transition(Phase.SURFACE_CREATED, "input surface created")
+
+        val m = try {
             MediaMuxer(videoFile.absolutePath, OUTPUT_FORMAT_MPEG_4)
         } catch (e: Exception) {
+            Log.e(TAG, "muxer creation failed while at phase=$phase", e)
+            runCatching { s.release() }
+            inputSurface = null
+            cleanupAfterInitFailure(c)
             throw EncoderStartException("Could not create output file: ${e.message}", e)
         }
+        muxer = m
+
+        try {
+            Log.i(TAG, "encoder start (entering Running state)")
+            c.start()
+            transition(Phase.RUNNING, "start()")
+        } catch (e: Exception) {
+            Log.e(TAG, "encoder start failed while at phase=$phase", e)
+            runCatching { s.release() }
+            inputSurface = null
+            runCatching { m.release() }
+            muxer = null
+            cleanupAfterInitFailure(c)
+            throw EncoderStartException("H.264 encoder start failed: ${e.message}", e)
+        }
+
         lastActivity.set(System.nanoTime())
         Log.i(
             TAG,
-            "encoder ready: avc ${w}x$h@${fps} ${bitrate / 1000}kbps CBR, COLOR_FormatSurface, input surface created"
+            "encoder ready: avc ${w}x$h@${fps} ${bitrate / 1000}kbps CBR, sequence configure->createInputSurface->start OK"
         )
         startWatchdog()
+    }
+
+    /**
+     * Best-effort teardown of a codec that failed during [init] so a half-configured
+     * encoder can never leak into the next export attempt.
+     */
+    private fun cleanupAfterInitFailure(c: MediaCodec) {
+        if (!codecStopped) {
+            try {
+                c.stop()
+                transition(Phase.STOPPED, "stop() after init failure")
+                codecStopped = true
+            } catch (e: Exception) {
+                Log.w(TAG, "codec.stop() during init-failure cleanup (not started/configured yet): ${e.message}")
+            }
+        }
+        try {
+            c.release()
+            transition(Phase.RELEASED, "release() after init failure")
+        } catch (e: Exception) {
+            Log.w(TAG, "codec.release() during init-failure cleanup failed", e)
+        }
+        codec = null
+        initCalled = false
     }
 
     private fun startWatchdog() {
@@ -139,8 +232,9 @@ class SurfaceEncoder(
                     try {
                         codec?.stop()
                         codecStopped = true
+                        transition(Phase.STOPPED, "stop() by stall watchdog")
                     } catch (e: Exception) {
-                        Log.w(TAG, "watchdog codec.stop failed", e)
+                        Log.w(TAG, "watchdog codec.stop failed (phase=$phase)", e)
                     }
                     return@Thread
                 }
@@ -236,21 +330,34 @@ class SurfaceEncoder(
     }
 
     /** Stop the encoder + muxer and release everything. Safe to call twice. */
+    @Synchronized
     fun release() {
+        Log.i(TAG, "release() requested (current phase=$phase)")
         active.set(false)
         watchdog?.let { runCatching { it.interrupt() } }
         watchdog = null
         val c = codec
         if (c != null && !codecStopped) {
             runFinalize("encoder stop") {
-                try { c.stop() } catch (e: Exception) { Log.w(TAG, "encoder stop failed", e) }
+                try {
+                    c.stop()
+                    transition(Phase.STOPPED, "stop()")
+                } catch (e: Exception) {
+                    Log.w(TAG, "encoder stop failed (phase=$phase)", e)
+                }
             }
             codecStopped = true
         }
         runFinalize("encoder release") {
-            try { c?.release() } catch (e: Exception) { Log.w(TAG, "encoder release failed", e) }
+            try {
+                c?.release()
+                transition(Phase.RELEASED, "release()")
+            } catch (e: Exception) {
+                Log.w(TAG, "encoder release failed", e)
+            }
         }
         codec = null
+        initCalled = false
         val m = muxer
         if (m != null) {
             runFinalize("muxer stop") {
@@ -268,6 +375,7 @@ class SurfaceEncoder(
         }
         muxer = null
         inputSurface = null
+        Log.i(TAG, "encoder fully released")
     }
 
     /** A frame was rendered + swapped: updates the watchdog timestamp. */
