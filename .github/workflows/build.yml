@@ -42,6 +42,9 @@ jobs:
         with:
           cache-read-only: false
 
+      - name: Ensure gradlew is executable
+        run: chmod +x ./gradlew
+
       - name: Run unit tests
         run: ./gradlew test --stacktrace
 
