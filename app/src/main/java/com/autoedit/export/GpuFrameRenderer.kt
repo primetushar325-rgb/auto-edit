@@ -186,6 +186,7 @@ class GpuFrameRenderer(
             drawClipToTarget(p, state.clipIndex, state.localT, clipDur, videoFrame, w, h)
             bindFbo(0)
             GLES20.glViewport(0, 0, w, h)
+            clearBlack() // Clear the main window surface before compositing
             GLES20.glUseProgram(progComp)
             bindQuad()
             GLES20.glUniformMatrix4fv(loc(progComp, "uModel"), 1, false, identity, 0)
@@ -223,9 +224,15 @@ class GpuFrameRenderer(
         targetW: Int,
         targetH: Int
     ) {
+        // CRITICAL FIX: We MUST clear the target surface/FBO to opaque black before drawing.
+        // EGL window surfaces allocated from MediaCodec share memory buffers with SurfaceFlinger.
+        // If we don't clear the buffer, the un-drawn areas (margins from letterboxing, or culled
+        // triangles) will contain stale graphics memory from the last thing the OS rendered — which 
+        // is exactly why the app's UI was bleeding through into the exported video.
+        clearBlack()
+
         val clip = p.clips.getOrNull(idx)
         if (clip == null) {
-            clearBlack()
             return
         }
         if (adjustments.blur > 0) {
